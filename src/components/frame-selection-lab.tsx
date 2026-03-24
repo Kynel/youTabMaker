@@ -1,6 +1,23 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import {
+  BookOpen,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  Expand,
+  Eye,
+  EyeOff,
+  Film,
+  Minus,
+  Pause,
+  Pencil,
+  Play,
+  Plus,
+  ScrollText,
+  X
+} from "lucide-react";
 
 import type {
   AssembledScoreAsset,
@@ -28,10 +45,21 @@ interface RawSelection {
 
 type PreviewBackground = "dark" | "light";
 type ScoreColorMode = "original" | "inverted";
+type ViewerMode = "scroll" | "page";
 type GapPreviewTarget =
   | { kind: "candidate"; cropIndex: number }
   | { kind: "previous" }
   | { kind: "next" };
+
+const VIEWER_PAGE_ASPECT_RATIO = 1.414;
+const VIEWER_PAGE_GAP_PX = 12;
+const VIEWER_AUTO_SCROLL_MIN = 2;
+const VIEWER_AUTO_SCROLL_MAX = 160;
+const VIEWER_AUTO_SCROLL_STEP = 2;
+const VIEWER_AUTO_SCROLL_DEFAULT = 48;
+const VIEWER_SCROLL_ZOOM_MIN = 40;
+const VIEWER_SCROLL_ZOOM_MAX = 320;
+const VIEWER_SCROLL_ZOOM_STEP = 20;
 
 interface ManualEditGap {
   key: string;
@@ -113,6 +141,10 @@ function clampProgress(progressPercent: number | undefined) {
 
 function formatReviewPercent(ratio: number) {
   return `${Math.max(0, Math.round(ratio * 100))}%`;
+}
+
+function formatViewerScrollSpeed(speed: number) {
+  return `${Math.round(speed)} px/s`;
 }
 
 function buildGapKey(previousCropIndex: number | null, nextCropIndex: number | null) {
@@ -252,6 +284,8 @@ export function FrameSelectionLab({
 }: FrameSelectionLabProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const viewerBodyRef = useRef<HTMLDivElement | null>(null);
+  const viewerAutoScrollPositionRef = useRef(0);
   const [imageElement, setImageElement] = useState<HTMLImageElement | null>(null);
   const [selection, setSelection] = useState<RawSelection | null>(null);
   const [dragState, setDragState] = useState<DragState | null>(null);
@@ -269,6 +303,14 @@ export function FrameSelectionLab({
   const [activeGapKey, setActiveGapKey] = useState<string | null>(null);
   const [activeScoreCropIndex, setActiveScoreCropIndex] = useState<number | null>(null);
   const [activeGapPreviewTarget, setActiveGapPreviewTarget] = useState<GapPreviewTarget | null>(null);
+  const [viewerMode, setViewerMode] = useState<ViewerMode>("scroll");
+  const [viewerPageSpread, setViewerPageSpread] = useState<1 | 2>(1);
+  const [viewerPageStartIndex, setViewerPageStartIndex] = useState(0);
+  const [viewerAutoScrollEnabled, setViewerAutoScrollEnabled] = useState(false);
+  const [viewerAutoScrollSpeed, setViewerAutoScrollSpeed] = useState<number>(VIEWER_AUTO_SCROLL_DEFAULT);
+  const [viewerScrollZoomPercent, setViewerScrollZoomPercent] = useState(100);
+  const [isViewerToolbarHidden, setIsViewerToolbarHidden] = useState(false);
+  const [viewerViewport, setViewerViewport] = useState({ width: 0, height: 0 });
 
   const frames = project?.frames ?? [];
   const projectId = project?.id ?? null;
@@ -299,6 +341,49 @@ export function FrameSelectionLab({
           project.assembledScore.generatedAt
         )}`
       : null;
+  const assembledScoreWidth = project?.assembledScore?.width ?? 0;
+  const assembledScoreHeight = project?.assembledScore?.height ?? 0;
+  const viewerAvailableWidth = Math.max(0, viewerViewport.width);
+  const viewerAvailableHeight = Math.max(0, viewerViewport.height);
+  const viewerPageWidth =
+    viewerMode === "page" && viewerAvailableWidth > 0 && viewerAvailableHeight > 0
+      ? Math.max(
+          0,
+          Math.min(
+            (viewerAvailableWidth - VIEWER_PAGE_GAP_PX * (viewerPageSpread - 1)) / viewerPageSpread,
+            viewerAvailableHeight / VIEWER_PAGE_ASPECT_RATIO
+          )
+        )
+      : 0;
+  const viewerPageHeight =
+    viewerMode === "page" ? Math.max(0, viewerPageWidth * VIEWER_PAGE_ASPECT_RATIO) : 0;
+  const viewerSourcePageHeight =
+    assembledScoreWidth > 0 ? assembledScoreWidth * VIEWER_PAGE_ASPECT_RATIO : 0;
+  const viewerPageCount =
+    viewerMode === "page" && viewerSourcePageHeight > 0
+      ? Math.max(1, Math.ceil(assembledScoreHeight / viewerSourcePageHeight))
+      : 0;
+  const viewerVisiblePageIndices =
+    viewerMode === "page" && viewerPageCount > 0
+      ? Array.from({ length: viewerPageSpread }, (_, index) => viewerPageStartIndex + index).filter(
+          (pageIndex) => pageIndex < viewerPageCount
+        )
+      : [];
+  const viewerVisiblePageEndIndex =
+    viewerMode === "page" && viewerPageCount > 0 ? Math.min(viewerPageCount, viewerPageStartIndex + viewerPageSpread) : 0;
+  const viewerPageRangeLabel =
+    viewerMode === "page" && viewerPageCount > 0 ? `${viewerPageStartIndex + 1}-${viewerVisiblePageEndIndex} / ${viewerPageCount}` : "0 / 0";
+  const viewerStatusLabel =
+    viewerMode === "scroll"
+      ? `${viewerAutoScrollEnabled ? "자동 스크롤" : "수동 보기"} · ${formatViewerScrollSpeed(
+          viewerAutoScrollSpeed
+        )} · ${viewerScrollZoomPercent}%`
+      : `${viewerPageSpread === 2 ? "2페이지" : "1페이지"} · ${viewerPageRangeLabel}`;
+  const canViewerGoPrevious = viewerMode === "page" && viewerPageStartIndex > 0;
+  const canViewerGoNext =
+    viewerMode === "page" &&
+    viewerPageCount > 0 &&
+    viewerPageStartIndex + viewerPageSpread < viewerPageCount;
 
   const selectedFrame =
     project && selectedFrameId ? frames.find((frame) => frame.id === selectedFrameId) ?? null : null;
@@ -470,6 +555,7 @@ export function FrameSelectionLab({
 
   useEffect(() => {
     if (!isScoreViewerOpen) {
+      setViewerAutoScrollEnabled(false);
       return;
     }
 
@@ -488,6 +574,131 @@ export function FrameSelectionLab({
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, [isScoreViewerOpen]);
+
+  useEffect(() => {
+    if (!isScoreViewerOpen) {
+      return;
+    }
+
+    setViewerMode("scroll");
+    setViewerPageSpread(1);
+    setViewerPageStartIndex(0);
+    setViewerAutoScrollEnabled(false);
+    setViewerScrollZoomPercent(100);
+    setIsViewerToolbarHidden(false);
+
+    const body = viewerBodyRef.current;
+
+    if (body) {
+      body.scrollTop = 0;
+      body.scrollLeft = 0;
+    }
+
+    viewerAutoScrollPositionRef.current = 0;
+  }, [isScoreViewerOpen, assembledScoreUrl]);
+
+  useEffect(() => {
+    if (!isScoreViewerOpen) {
+      return;
+    }
+
+    const body = viewerBodyRef.current;
+
+    if (!body) {
+      return;
+    }
+
+    const updateViewerViewport = () => {
+      setViewerViewport({
+        width: body.clientWidth,
+        height: body.clientHeight
+      });
+    };
+
+    updateViewerViewport();
+
+    const resizeObserver = new ResizeObserver(() => {
+      updateViewerViewport();
+    });
+
+    resizeObserver.observe(body);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [isScoreViewerOpen, viewerMode, viewerPageSpread]);
+
+  useEffect(() => {
+    if (viewerMode !== "scroll" && viewerAutoScrollEnabled) {
+      setViewerAutoScrollEnabled(false);
+    }
+  }, [viewerMode, viewerAutoScrollEnabled]);
+
+  useEffect(() => {
+    if (viewerMode !== "page") {
+      return;
+    }
+
+    setViewerPageStartIndex((currentPageStartIndex) => {
+      const maximumStartIndex = Math.max(0, viewerPageCount - 1);
+      const normalizedPageStartIndex = Math.min(Math.max(0, currentPageStartIndex), maximumStartIndex);
+
+      if (viewerPageSpread === 2) {
+        return Math.max(0, normalizedPageStartIndex - (normalizedPageStartIndex % 2));
+      }
+
+      return normalizedPageStartIndex;
+    });
+  }, [viewerMode, viewerPageCount, viewerPageSpread]);
+
+  useEffect(() => {
+    if (!isScoreViewerOpen || viewerMode !== "scroll" || !viewerAutoScrollEnabled) {
+      return;
+    }
+
+    const body = viewerBodyRef.current;
+
+    if (!body) {
+      return;
+    }
+
+    let animationFrameId = 0;
+    let previousTimestamp = performance.now();
+    viewerAutoScrollPositionRef.current = body.scrollTop;
+
+    const tick = (timestamp: number) => {
+      const elapsedSeconds = (timestamp - previousTimestamp) / 1000;
+      previousTimestamp = timestamp;
+
+      const maximumScrollTop = Math.max(0, body.scrollHeight - body.clientHeight);
+
+      if (maximumScrollTop <= 0) {
+        setViewerAutoScrollEnabled(false);
+        return;
+      }
+
+      viewerAutoScrollPositionRef.current = Math.min(
+        maximumScrollTop,
+        viewerAutoScrollPositionRef.current + viewerAutoScrollSpeed * elapsedSeconds
+      );
+
+      const nextScrollTop = viewerAutoScrollPositionRef.current;
+      body.scrollTop = nextScrollTop;
+
+      if (nextScrollTop >= maximumScrollTop - 1) {
+        setViewerAutoScrollEnabled(false);
+        return;
+      }
+
+      animationFrameId = window.requestAnimationFrame(tick);
+    };
+
+    animationFrameId = window.requestAnimationFrame(tick);
+
+    return () => {
+      window.cancelAnimationFrame(animationFrameId);
+    };
+  }, [isScoreViewerOpen, viewerMode, viewerAutoScrollEnabled, viewerAutoScrollSpeed]);
 
   useEffect(() => {
     if (!assembledScoreUrl) {
@@ -1088,6 +1299,36 @@ export function FrameSelectionLab({
     onRequestWorkspaceMode("convert");
   }
 
+  function switchViewerMode(nextMode: ViewerMode) {
+    setViewerMode(nextMode);
+
+    if (nextMode === "scroll") {
+      setViewerPageStartIndex(0);
+      return;
+    }
+
+    setViewerAutoScrollEnabled(false);
+    setViewerPageStartIndex(0);
+  }
+
+  function adjustViewerScrollZoom(delta: number) {
+    setViewerScrollZoomPercent((currentZoom) =>
+      clampNumber(currentZoom + delta, VIEWER_SCROLL_ZOOM_MIN, VIEWER_SCROLL_ZOOM_MAX)
+    );
+  }
+
+  function goToPreviousViewerPages() {
+    setViewerPageStartIndex((currentPageStartIndex) =>
+      Math.max(0, currentPageStartIndex - viewerPageSpread)
+    );
+  }
+
+  function goToNextViewerPages() {
+    setViewerPageStartIndex((currentPageStartIndex) =>
+      Math.min(Math.max(0, viewerPageCount - 1), currentPageStartIndex + viewerPageSpread)
+    );
+  }
+
   const assembledImageClassName =
     scoreColorMode === "inverted" ? "assembled-image is-inverted" : "assembled-image";
   const viewerImageClassName = scoreColorMode === "inverted" ? "viewer-image is-inverted" : "viewer-image";
@@ -1424,10 +1665,16 @@ export function FrameSelectionLab({
                       type="button"
                       onClick={() => onRequestWorkspaceMode("edit")}
                     >
-                      악보 수정 탭
+                      <span className="button-with-icon">
+                        <Pencil className="button-icon" aria-hidden="true" />
+                        <span className="button-label">악보 수정 탭</span>
+                      </span>
                     </button>
                     <button className="ghost-button" type="button" onClick={() => setIsScoreViewerOpen(true)}>
-                      크게 보기
+                      <span className="button-with-icon">
+                        <Expand className="button-icon" aria-hidden="true" />
+                        <span className="button-label">크게 보기</span>
+                      </span>
                     </button>
                     <button
                       className="primary-button"
@@ -1435,7 +1682,10 @@ export function FrameSelectionLab({
                       onClick={() => void downloadScoreImage()}
                       disabled={isDownloadingScore || isExportLocked}
                     >
-                      {isDownloadingScore ? "PNG 생성 중" : "PNG"}
+                      <span className="button-with-icon">
+                        <Download className="button-icon" aria-hidden="true" />
+                        <span className="button-label">{isDownloadingScore ? "PNG 생성 중" : "PNG"}</span>
+                      </span>
                     </button>
                   </div>
                   {isExportLocked ? (
@@ -1461,7 +1711,10 @@ export function FrameSelectionLab({
             </div>
             <div className="action-row">
               <button className="ghost-button" type="button" onClick={() => onRequestWorkspaceMode("convert")}>
-                유튜브 변환 탭
+                <span className="button-with-icon">
+                  <Film className="button-icon" aria-hidden="true" />
+                  <span className="button-label">유튜브 변환 탭</span>
+                </span>
               </button>
               <p className="status-line">{summaryText}</p>
             </div>
@@ -1513,7 +1766,10 @@ export function FrameSelectionLab({
                     </button>
                   </div>
                   <button className="ghost-button" type="button" onClick={() => setIsScoreViewerOpen(true)}>
-                    크게 보기
+                    <span className="button-with-icon">
+                      <Expand className="button-icon" aria-hidden="true" />
+                      <span className="button-label">크게 보기</span>
+                    </span>
                   </button>
                   <button
                     className="primary-button"
@@ -1521,7 +1777,10 @@ export function FrameSelectionLab({
                     onClick={() => void downloadScoreImage()}
                     disabled={isDownloadingScore || isExportLocked}
                   >
-                    {isDownloadingScore ? "PNG 생성 중" : "PNG"}
+                    <span className="button-with-icon">
+                      <Download className="button-icon" aria-hidden="true" />
+                      <span className="button-label">{isDownloadingScore ? "PNG 생성 중" : "PNG"}</span>
+                    </span>
                   </button>
                 </div>
               </div>
@@ -1597,26 +1856,262 @@ export function FrameSelectionLab({
           onClick={() => setIsScoreViewerOpen(false)}
         >
           <div className="viewer-panel" onClick={(event) => event.stopPropagation()}>
-            <div className="viewer-toolbar">
-              <p className="section-label">Fullscreen Tab</p>
-              <div className="action-row">
+            {isViewerToolbarHidden ? (
+              <div className="viewer-floating-actions">
                 <button
-                  className="primary-button"
+                  className="ghost-button icon-button"
                   type="button"
-                  onClick={() => void downloadScoreImage()}
-                  disabled={isDownloadingScore || isExportLocked}
+                  onClick={() => setIsViewerToolbarHidden(false)}
+                  aria-label="설정 보기"
+                  title="설정 보기"
                 >
-                  {isDownloadingScore ? "PNG 생성 중" : "PNG"}
+                  <Eye className="button-icon" aria-hidden="true" />
                 </button>
-                <button className="ghost-button" type="button" onClick={() => setIsScoreViewerOpen(false)}>
-                  닫기
+                <button
+                  className="ghost-button icon-button"
+                  type="button"
+                  onClick={() => setIsScoreViewerOpen(false)}
+                  aria-label="닫기"
+                  title="닫기"
+                >
+                  <X className="button-icon" aria-hidden="true" />
                 </button>
               </div>
-            </div>
-            <div className={previewBackground === "dark" ? "viewer-body is-dark" : "viewer-body is-light"}>
-              <div className="viewer-image-shell">
-                <img className={viewerImageClassName} src={assembledScoreUrl} alt="Full assembled guitar tab score" />
+            ) : (
+              <div className="viewer-toolbar">
+                <div className="viewer-toolbar-strip">
+                  <div className="viewer-toolbar-brand">
+                    <p className="section-label">Fullscreen Tab</p>
+                    <p className="viewer-toolbar-status">{viewerStatusLabel}</p>
+                  </div>
+                  <div className="viewer-toolbar-inline-group" role="group" aria-label="Viewer mode">
+                    <span className="viewer-inline-label">보기</span>
+                    <div className="toggle-group">
+                      <button
+                        className={viewerMode === "scroll" ? "toggle-button is-active" : "toggle-button"}
+                        type="button"
+                        onClick={() => switchViewerMode("scroll")}
+                      >
+                        <span className="button-with-icon">
+                          <ScrollText className="button-icon" aria-hidden="true" />
+                          <span className="button-label">스크롤</span>
+                        </span>
+                      </button>
+                      <button
+                        className={viewerMode === "page" ? "toggle-button is-active" : "toggle-button"}
+                        type="button"
+                        onClick={() => switchViewerMode("page")}
+                      >
+                        <span className="button-with-icon">
+                          <BookOpen className="button-icon" aria-hidden="true" />
+                          <span className="button-label">페이지</span>
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {viewerMode === "scroll" ? (
+                    <>
+                      <div className="viewer-toolbar-inline-group">
+                        <span className="viewer-inline-label">확대</span>
+                        <button
+                          className="ghost-button icon-button"
+                          type="button"
+                          onClick={() => adjustViewerScrollZoom(-VIEWER_SCROLL_ZOOM_STEP)}
+                          disabled={viewerScrollZoomPercent <= VIEWER_SCROLL_ZOOM_MIN}
+                          aria-label="축소"
+                          title="축소"
+                        >
+                          <Minus className="button-icon" aria-hidden="true" />
+                        </button>
+                        <p className="viewer-control-value">{viewerScrollZoomPercent}%</p>
+                        <button
+                          className="ghost-button icon-button"
+                          type="button"
+                          onClick={() => adjustViewerScrollZoom(VIEWER_SCROLL_ZOOM_STEP)}
+                          disabled={viewerScrollZoomPercent >= VIEWER_SCROLL_ZOOM_MAX}
+                          aria-label="확대"
+                          title="확대"
+                        >
+                          <Plus className="button-icon" aria-hidden="true" />
+                        </button>
+                      </div>
+                      <div className="viewer-toolbar-inline-group is-grow">
+                        <button
+                          className={viewerAutoScrollEnabled ? "primary-button" : "ghost-button"}
+                          type="button"
+                          onClick={() => setViewerAutoScrollEnabled((currentValue) => !currentValue)}
+                        >
+                          <span className="button-with-icon">
+                            {viewerAutoScrollEnabled ? (
+                              <Pause className="button-icon" aria-hidden="true" />
+                            ) : (
+                              <Play className="button-icon" aria-hidden="true" />
+                            )}
+                            <span className="button-label">{viewerAutoScrollEnabled ? "정지" : "시작"}</span>
+                          </span>
+                        </button>
+                        <label className="viewer-slider-wrap is-inline">
+                          <span className="viewer-inline-label">속도</span>
+                          <input
+                            className="viewer-speed-slider"
+                            type="range"
+                            min={VIEWER_AUTO_SCROLL_MIN}
+                            max={VIEWER_AUTO_SCROLL_MAX}
+                            step={VIEWER_AUTO_SCROLL_STEP}
+                            value={viewerAutoScrollSpeed}
+                            onChange={(event) => setViewerAutoScrollSpeed(Number(event.currentTarget.value))}
+                          />
+                        </label>
+                        <p className="viewer-control-value">{formatViewerScrollSpeed(viewerAutoScrollSpeed)}</p>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="viewer-toolbar-inline-group" role="group" aria-label="Page spread">
+                        <span className="viewer-inline-label">페이지</span>
+                        <div className="toggle-group">
+                          <button
+                            className={viewerPageSpread === 1 ? "toggle-button is-active" : "toggle-button"}
+                            type="button"
+                            onClick={() => setViewerPageSpread(1)}
+                          >
+                            <span className="button-with-icon">
+                              <BookOpen className="button-icon" aria-hidden="true" />
+                              <span className="button-label">1페이지</span>
+                            </span>
+                          </button>
+                          <button
+                            className={viewerPageSpread === 2 ? "toggle-button is-active" : "toggle-button"}
+                            type="button"
+                            onClick={() => setViewerPageSpread(2)}
+                            disabled={viewerPageCount < 2}
+                          >
+                            <span className="button-with-icon">
+                              <BookOpen className="button-icon" aria-hidden="true" />
+                              <span className="button-label">2페이지</span>
+                            </span>
+                          </button>
+                        </div>
+                      </div>
+                      <div className="viewer-toolbar-inline-group">
+                        <button
+                          className="ghost-button icon-button"
+                          type="button"
+                          onClick={goToPreviousViewerPages}
+                          disabled={!canViewerGoPrevious}
+                          aria-label="이전 페이지"
+                          title="이전 페이지"
+                        >
+                          <ChevronLeft className="button-icon" aria-hidden="true" />
+                        </button>
+                        <p className="viewer-control-value">{viewerPageRangeLabel}</p>
+                        <button
+                          className="ghost-button icon-button"
+                          type="button"
+                          onClick={goToNextViewerPages}
+                          disabled={!canViewerGoNext}
+                          aria-label="다음 페이지"
+                          title="다음 페이지"
+                        >
+                          <ChevronRight className="button-icon" aria-hidden="true" />
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+                <div className="viewer-toolbar-actions">
+                  <button
+                    className="ghost-button icon-button"
+                    type="button"
+                    onClick={() => setIsViewerToolbarHidden(true)}
+                    aria-label="설정 숨기기"
+                    title="설정 숨기기"
+                  >
+                    <EyeOff className="button-icon" aria-hidden="true" />
+                  </button>
+                  <button
+                    className="primary-button"
+                    type="button"
+                    onClick={() => void downloadScoreImage()}
+                    disabled={isDownloadingScore || isExportLocked}
+                  >
+                    <span className="button-with-icon">
+                      <Download className="button-icon" aria-hidden="true" />
+                      <span className="button-label">{isDownloadingScore ? "PNG 생성 중" : "PNG"}</span>
+                    </span>
+                  </button>
+                  <button
+                    className="ghost-button icon-button"
+                    type="button"
+                    onClick={() => setIsScoreViewerOpen(false)}
+                    aria-label="닫기"
+                    title="닫기"
+                  >
+                    <X className="button-icon" aria-hidden="true" />
+                  </button>
+                </div>
               </div>
+            )}
+            <div
+              ref={viewerBodyRef}
+              className={
+                previewBackground === "dark"
+                  ? viewerMode === "page"
+                    ? "viewer-body is-dark is-page-mode"
+                    : viewerScrollZoomPercent > 100
+                      ? "viewer-body is-dark is-scroll-zoomed"
+                      : "viewer-body is-dark"
+                  : viewerMode === "page"
+                    ? "viewer-body is-light is-page-mode"
+                    : viewerScrollZoomPercent > 100
+                      ? "viewer-body is-light is-scroll-zoomed"
+                      : "viewer-body is-light"
+              }
+            >
+              {viewerMode === "scroll" ? (
+                <div
+                  className={viewerScrollZoomPercent > 100 ? "viewer-image-shell is-zoomed" : "viewer-image-shell"}
+                  style={{
+                    width: `${viewerScrollZoomPercent}%`
+                  }}
+                >
+                  <img className={viewerImageClassName} src={assembledScoreUrl} alt="Full assembled guitar tab score" />
+                </div>
+              ) : viewerVisiblePageIndices.length > 0 && viewerPageWidth > 0 && viewerPageHeight > 0 ? (
+                <div className={viewerPageSpread === 2 ? "viewer-page-stage is-two-page" : "viewer-page-stage"}>
+                  {viewerVisiblePageIndices.map((pageIndex) => (
+                    <div
+                      className="viewer-page-shell"
+                      key={pageIndex}
+                      style={{
+                        width: `${viewerPageWidth}px`
+                      }}
+                    >
+                      <div
+                        className="viewer-page-frame"
+                        style={{
+                          height: `${viewerPageHeight}px`
+                        }}
+                      >
+                        <img
+                          className={`${viewerImageClassName} viewer-page-image`}
+                          src={assembledScoreUrl}
+                          alt={`Full assembled guitar tab score page ${pageIndex + 1}`}
+                          style={{
+                            top: `-${pageIndex * viewerPageHeight}px`
+                          }}
+                        />
+                        <p className="viewer-page-label">
+                          페이지 {pageIndex + 1}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="empty-box">페이지를 준비하는 중입니다.</div>
+              )}
             </div>
           </div>
         </div>

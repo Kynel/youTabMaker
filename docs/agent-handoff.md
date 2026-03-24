@@ -35,6 +35,11 @@ The repository was empty at the start of this session. It now contains a web-fir
 - the insertion popup now renders larger candidate cards so omitted systems are easier to compare at a glance
 - clicking a candidate card in the insertion popup now switches the full popup into a large preview state on demand, so users only see the expanded crop after they select it
 - the previous/next boundary cards in the insertion popup are also clickable now, using the same enlarged modal preview without exposing an add action
+- the fullscreen tab viewer now has a scroll mode with slider-based auto-scroll control, plus a page mode with one-page and two-page viewing that keeps full pages visible vertically
+- the fullscreen viewer toolbar was refactored from stacked setting cards into a compact inline bar, reducing top chrome so more of the score is visible
+- scroll mode now exposes `- / +` zoom controls for the full score, and low auto-scroll values no longer stall because the viewer advances from an accumulated scroll target instead of relying on per-frame integer scrollTop changes
+- fullscreen mode can now hide the toolbar completely and bring it back with a small floating action button, which is useful when the user wants maximum score height
+- `lucide-react` was added and is now used for the obvious viewer/workbench actions, and the scroll-view zoom range was widened to `40% ~ 320%`
 - each stitched region in edit mode now keeps its timestamp visible in the top-left corner of the score overlay
 - documentation for product scope, architecture, and implementation phases
 

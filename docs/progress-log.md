@@ -68,6 +68,11 @@
 - the add popup no longer shows the old `프레임` button for each candidate or for the start/end context cards
 - the start/end context cards in the add popup are now visually emphasized so the insertion boundaries read more clearly
 - the start/end context cards are now also clickable for the same enlarged modal preview, but they stay reference-only and never expose `추가`
+- the fullscreen tab viewer now supports `스크롤` / `페이지` modes, a slider-based auto-scroll speed control in scroll mode, and a two-page spread option in page mode without clipping the page vertically
+- the fullscreen tab viewer toolbar has been compressed into a low-height inline control bar so the score gets more vertical space immediately when the modal opens
+- scroll mode now has `- / +` zoom controls for the stitched score, and low auto-scroll speeds use an accumulated scroll position so they keep moving smoothly instead of stalling
+- fullscreen mode can now hide the top toolbar entirely and restore it with a small floating action, so the score can use nearly the whole viewport height
+- the viewer and main workbench actions now use `lucide-react` icons where the action is visually obvious, and scroll-view zoom now spans a wider `40% ~ 320%` range
 - edit mode now keeps each stitched segment's timestamp visible at the top-left of the large score overlay
 - project documentation and agent handoff docs
 

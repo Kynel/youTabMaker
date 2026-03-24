@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
+import { Link2, RefreshCw, RotateCcw } from "lucide-react";
 
 import type { DraftProject } from "@/lib/types";
 
@@ -117,13 +118,22 @@ export function YouTubeIntakeForm({
         </label>
 
         <button className="primary-button" type="submit" disabled={isSubmitting}>
-          {isSubmitting ? "연결 중" : "불러오기"}
+          <span className="button-with-icon">
+            <Link2 className="button-icon" aria-hidden="true" />
+            <span className="button-label">{isSubmitting ? "연결 중" : "불러오기"}</span>
+          </span>
         </button>
         <button className="ghost-button" type="button" onClick={onRecapture} disabled={!project || isCapturing}>
-          다시 추출
+          <span className="button-with-icon">
+            <RefreshCw className="button-icon" aria-hidden="true" />
+            <span className="button-label">다시 추출</span>
+          </span>
         </button>
         <button className="ghost-button" type="button" onClick={onResetWorkspace}>
-          초기화
+          <span className="button-with-icon">
+            <RotateCcw className="button-icon" aria-hidden="true" />
+            <span className="button-label">초기화</span>
+          </span>
         </button>
       </form>
 

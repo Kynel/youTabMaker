@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { Film, Pencil } from "lucide-react";
 
 import { FrameSelectionLab } from "@/components/frame-selection-lab";
 import { YouTubeIntakeForm } from "@/components/youtube-intake-form";
@@ -142,7 +143,10 @@ export function TabWorkbench() {
             aria-selected={workspaceMode === "convert"}
             onClick={() => setWorkspaceMode("convert")}
           >
-            유튜브 변환
+            <span className="button-with-icon">
+              <Film className="button-icon" aria-hidden="true" />
+              <span className="button-label">유튜브 변환</span>
+            </span>
           </button>
           <button
             className={workspaceMode === "edit" ? "workspace-tab is-active" : "workspace-tab"}
@@ -152,7 +156,10 @@ export function TabWorkbench() {
             disabled={!project?.assembledScore}
             onClick={() => setWorkspaceMode("edit")}
           >
-            악보 수정
+            <span className="button-with-icon">
+              <Pencil className="button-icon" aria-hidden="true" />
+              <span className="button-label">악보 수정</span>
+            </span>
           </button>
         </div>
       </section>
