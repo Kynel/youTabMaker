@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { readdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import sharp from "sharp";
@@ -11,7 +11,20 @@ import {
   getProjectFramesDirectory,
   getProjectOutputDirectory
 } from "@/lib/storage";
-import type { AssembledScoreAsset, ProjectFrameAsset, RoiSelection, VideoAsset } from "@/lib/types";
+import type {
+  AssembledScoreAsset,
+  AssemblyCropAsset,
+  AssemblyEditorState,
+  AssemblyManualEditState,
+  AssemblyReviewDecision,
+  AssemblyReviewItem,
+  AssemblyReviewState,
+  AssemblySequenceItem,
+  AssemblyTrimMode,
+  ProjectFrameAsset,
+  RoiSelection,
+  VideoAsset
+} from "@/lib/types";
 
 const MIN_TAB_DARK_RATIO = 0.02;
 const RECENT_DUPLICATE_WINDOW = 6;
@@ -22,11 +35,16 @@ const MIN_OVERLAP_RATIO = 0.12;
 const MAX_OVERLAP_RATIO = 0.92;
 const MIN_ACTIVE_OVERLAP_RATIO = 0.035;
 const STRICT_OVERLAP_SCORE = 0.095;
-const RELAXED_OVERLAP_SCORE = 0.125;
+const REVIEW_OVERLAP_SCORE = 0.28;
+const SAFE_AUTO_OVERLAP_SCORE = 0.062;
+const MAX_OVERLAP_TRIM_RATIO = 0.33;
+const SAFE_AUTO_OVERLAP_TRIM_RATIO = 0.18;
 const MIN_NEW_CONTENT_PX = 32;
 const MIN_NEW_CONTENT_RATIO = 0.08;
 const SHEET_PADDING = 18;
 const PAGE_BREAK_GAP = 18;
+const NORMALIZED_CROPS_DIRECTORY = path.posix.join("output", "normalized-crops");
+const ASSEMBLY_MANIFEST_PATH = path.posix.join("output", "assembly-manifest.json");
 
 interface PreparedCrop {
   frame: ProjectFrameAsset;
@@ -44,14 +62,65 @@ interface AnalysisImage {
 
 interface NormalizedCrop extends PreparedCrop {
   analysis: AnalysisImage;
+  relativePath: string;
 }
 
-interface AppendedCrop extends NormalizedCrop {
+interface AppendedCrop {
+  frame: ProjectFrameAsset;
+  sourceRelativePath: string;
+  width: number;
+  height: number;
   appendBuffer: Buffer;
   appendHeight: number;
   overlapTrimTopPx: number;
   overlapScore: number | null;
   gapBefore: number;
+  hash: string;
+  trimMode: AssemblyTrimMode;
+  cropIndex: number;
+  transitionId?: string;
+}
+
+interface CropManifestEntry {
+  index: number;
+  frameId: string;
+  timestampSec: number;
+  relativePath: string;
+  width: number;
+  height: number;
+  hash: string;
+}
+
+interface TransitionManifestEntry {
+  id: string;
+  previousCropIndex: number;
+  currentCropIndex: number;
+  overlapScore: number;
+  overlapTrimCandidatePx: number;
+  overlapTrimRatio: number;
+  autoTrimApplied: boolean;
+  recommendedDecision: AssemblyReviewDecision;
+  reason: string;
+}
+
+interface AssemblyManifest {
+  generatedAt: string;
+  sourceFrameCount: number;
+  normalizationWidth: number;
+  roi: RoiSelection;
+  crops: CropManifestEntry[];
+  transitions: TransitionManifestEntry[];
+}
+
+interface AssembleProjectScoreResult {
+  assembledScore: AssembledScoreAsset;
+  assemblyEditor: AssemblyEditorState;
+  assemblyReview: AssemblyReviewState;
+}
+
+interface RenderAssemblyOptions {
+  orderedCropIndices?: number[];
+  forcedCropIndices?: number[];
 }
 
 interface PipelineProgressUpdate {
@@ -170,63 +239,68 @@ export async function downloadProjectVideo(
   const downloadsDirectory = getProjectDownloadsDirectory(projectId);
   const outputTemplate = path.join(downloadsDirectory, "source.%(ext)s");
 
-  const { stdout } = await runTool("yt-dlp", [
-    "--no-playlist",
-    "--no-warnings",
-    "--newline",
-    "--progress-template",
-    "download:%(progress._percent_str)s",
-    "--format",
-    "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
-    "--merge-output-format",
-    "mp4",
-    "--print",
-    "after_move:filepath",
-    "--output",
-    outputTemplate,
-    normalizedUrl
-  ], undefined, {
-    onStdoutLine: (line) => {
-      const match = line.match(/download:\s*([\d.]+)%/);
+  const { stdout } = await runTool(
+    "yt-dlp",
+    [
+      "--no-playlist",
+      "--no-warnings",
+      "--newline",
+      "--progress-template",
+      "download:%(progress._percent_str)s",
+      "--format",
+      "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
+      "--merge-output-format",
+      "mp4",
+      "--print",
+      "after_move:filepath",
+      "--output",
+      outputTemplate,
+      normalizedUrl
+    ],
+    undefined,
+    {
+      onStdoutLine: (line) => {
+        const match = line.match(/download:\s*([\d.]+)%/);
 
-      if (!match) {
-        return;
+        if (!match) {
+          return;
+        }
+
+        const percent = Number.parseFloat(match[1]);
+
+        if (!Number.isFinite(percent) || !onProgress) {
+          return;
+        }
+
+        void onProgress({
+          stage: "downloading",
+          label: "영상 다운로드 중",
+          detail: "유튜브 영상을 가져오고 있습니다.",
+          progressPercent: 8 + percent * 0.32
+        });
+      },
+      onStderrLine: (line) => {
+        const match = line.match(/download:\s*([\d.]+)%/);
+
+        if (!match) {
+          return;
+        }
+
+        const percent = Number.parseFloat(match[1]);
+
+        if (!Number.isFinite(percent) || !onProgress) {
+          return;
+        }
+
+        void onProgress({
+          stage: "downloading",
+          label: "영상 다운로드 중",
+          detail: "유튜브 영상을 가져오고 있습니다.",
+          progressPercent: 8 + percent * 0.32
+        });
       }
-
-      const percent = Number.parseFloat(match[1]);
-
-      if (!Number.isFinite(percent) || !onProgress) {
-        return;
-      }
-
-      void onProgress({
-        stage: "downloading",
-        label: "영상 다운로드 중",
-        detail: "유튜브 영상을 가져오고 있습니다.",
-        progressPercent: 8 + percent * 0.32
-      });
-    },
-    onStderrLine: (line) => {
-      const match = line.match(/download:\s*([\d.]+)%/);
-
-      if (!match) {
-        return;
-      }
-
-      const percent = Number.parseFloat(match[1]);
-
-      if (!Number.isFinite(percent) || !onProgress) {
-        return;
-      }
-
-      void onProgress({
-        stage: "downloading",
-        label: "영상 다운로드 중",
-        detail: "유튜브 영상을 가져오고 있습니다.",
-        progressPercent: 8 + percent * 0.32
-      });
     }
-  });
+  );
 
   const absoluteVideoPath = getLastNonEmptyLine(stdout);
 
@@ -254,46 +328,51 @@ export async function extractProjectFrames(
   const framesDirectory = getProjectFramesDirectory(projectId);
   const outputTemplate = path.join(framesDirectory, "frame-%05d.jpg");
 
-  await runTool("ffmpeg", [
-    "-hide_banner",
-    "-loglevel",
-    "error",
-    "-nostats",
-    "-y",
-    "-i",
-    absoluteVideoPath,
-    "-vf",
-    "fps=1",
-    "-q:v",
-    "2",
-    "-start_number",
-    "0",
-    "-progress",
-    "pipe:1",
-    outputTemplate
-  ], undefined, {
-    onStdoutLine: (line) => {
-      if (!onProgress || !videoAsset.durationSeconds) {
-        return;
+  await runTool(
+    "ffmpeg",
+    [
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-nostats",
+      "-y",
+      "-i",
+      absoluteVideoPath,
+      "-vf",
+      "fps=1",
+      "-q:v",
+      "2",
+      "-start_number",
+      "0",
+      "-progress",
+      "pipe:1",
+      outputTemplate
+    ],
+    undefined,
+    {
+      onStdoutLine: (line) => {
+        if (!onProgress || !videoAsset.durationSeconds) {
+          return;
+        }
+
+        const match = line.match(/^out_time_(?:ms|us)=(\d+)$/);
+
+        if (!match) {
+          return;
+        }
+
+        const outTimeSeconds = Number.parseInt(match[1], 10) / 1_000_000;
+        const percent = Math.min(1, outTimeSeconds / videoAsset.durationSeconds);
+
+        void onProgress({
+          stage: "extracting",
+          label: "프레임 추출 중",
+          detail: "1초 간격으로 전체 영상을 캡처하고 있습니다.",
+          progressPercent: 42 + percent * 42
+        });
       }
-
-      const match = line.match(/^out_time_(?:ms|us)=(\d+)$/);
-
-      if (!match) {
-        return;
-      }
-
-      const outTimeSeconds = Number.parseInt(match[1], 10) / 1_000_000;
-      const percent = Math.min(1, outTimeSeconds / videoAsset.durationSeconds);
-
-      void onProgress({
-        stage: "extracting",
-        label: "프레임 추출 중",
-        detail: "1초 간격으로 전체 영상을 캡처하고 있습니다.",
-        progressPercent: 42 + percent * 42
-      });
     }
-  });
+  );
 
   const frameFiles = (await readdir(framesDirectory))
     .filter((fileName) => fileName.endsWith(".jpg"))
@@ -449,11 +528,405 @@ function findVerticalOverlap(previous: AnalysisImage, current: AnalysisImage) {
     }
   }
 
-  if (bestCandidate && bestCandidate.score <= RELAXED_OVERLAP_SCORE) {
+  if (bestCandidate) {
     return bestCandidate;
   }
 
   return null;
+}
+
+function buildTransitionId(previousCrop: CropManifestEntry, currentCrop: CropManifestEntry) {
+  return `${previousCrop.index}-${currentCrop.index}-${previousCrop.frameId}-${currentCrop.frameId}`;
+}
+
+function formatRatioPercent(ratio: number) {
+  return Math.max(0, Math.round(ratio * 100));
+}
+
+function buildReviewReason(overlapScore: number, overlapTrimRatio: number) {
+  const trimPercent = formatRatioPercent(overlapTrimRatio);
+  return `겹침 후보가 감지됐지만 자동 제거 확신도가 낮습니다. 예상 절삭 ${trimPercent}%, 유사도 ${overlapScore.toFixed(3)}.`;
+}
+
+function isSafeAutomaticTrim(overlapScore: number, overlapTrimRatio: number) {
+  return overlapScore <= SAFE_AUTO_OVERLAP_SCORE && overlapTrimRatio <= SAFE_AUTO_OVERLAP_TRIM_RATIO;
+}
+
+function buildTransitionKey(previousCropIndex: number, currentCropIndex: number) {
+  return `${previousCropIndex}:${currentCropIndex}`;
+}
+
+function buildAssemblyCropAsset(crop: CropManifestEntry): AssemblyCropAsset {
+  return {
+    cropIndex: crop.index,
+    frameId: crop.frameId,
+    timestampSec: crop.timestampSec,
+    relativePath: crop.relativePath,
+    width: crop.width,
+    height: crop.height
+  };
+}
+
+function buildAssemblyReviewState(
+  manifest: AssemblyManifest,
+  decisions: Partial<Record<string, AssemblyReviewDecision>>
+): AssemblyReviewState {
+  const items = manifest.transitions
+    .filter((transition) => !transition.autoTrimApplied && transition.overlapTrimCandidatePx > 0)
+    .map((transition) => {
+      const previousCrop = manifest.crops[transition.previousCropIndex];
+      const currentCrop = manifest.crops[transition.currentCropIndex];
+
+      return {
+        id: transition.id,
+        previousFrameId: previousCrop.frameId,
+        previousTimestampSec: previousCrop.timestampSec,
+        previousCropRelativePath: previousCrop.relativePath,
+        currentFrameId: currentCrop.frameId,
+        currentTimestampSec: currentCrop.timestampSec,
+        currentCropRelativePath: currentCrop.relativePath,
+        overlapScore: transition.overlapScore,
+        overlapTrimCandidatePx: transition.overlapTrimCandidatePx,
+        overlapTrimRatio: transition.overlapTrimRatio,
+        reason: transition.reason,
+        recommendedDecision: transition.recommendedDecision,
+        decision: decisions[transition.id]
+      } satisfies AssemblyReviewItem;
+    });
+
+  const pendingCount = items.filter((item) => !item.decision).length;
+
+  return {
+    generatedAt: new Date().toISOString(),
+    totalCount: items.length,
+    pendingCount,
+    items
+  };
+}
+
+async function buildStitchedCropsFromManifest(
+  projectId: string,
+  manifest: AssemblyManifest,
+  decisions: Partial<Record<string, AssemblyReviewDecision>>,
+  options: RenderAssemblyOptions,
+  onProgress?: PipelineProgressReporter
+) {
+  const requestedOrder =
+    options.orderedCropIndices && options.orderedCropIndices.length > 0
+      ? options.orderedCropIndices.filter(
+          (cropIndex, position, cropIndices) =>
+            Number.isInteger(cropIndex) &&
+            cropIndex >= 0 &&
+            cropIndex < manifest.crops.length &&
+            cropIndices.indexOf(cropIndex) === position
+        )
+      : manifest.crops.map((crop) => crop.index);
+  const forcedCropIndices = options.forcedCropIndices?.filter((cropIndex) => requestedOrder.includes(cropIndex)) ?? [];
+  const forcedCropIndexSet = new Set(forcedCropIndices);
+  const transitionByPairKey = new Map(
+    manifest.transitions.map((transition) => [
+      buildTransitionKey(transition.previousCropIndex, transition.currentCropIndex),
+      transition
+    ])
+  );
+  const stitchedCrops: AppendedCrop[] = [];
+
+  for (const [sequenceIndex, cropIndex] of requestedOrder.entries()) {
+    const crop = manifest.crops[cropIndex];
+
+    if (!crop) {
+      continue;
+    }
+
+    const cropBuffer = await readFile(getProjectAssetAbsolutePath(projectId, crop.relativePath));
+    const previousCrop = stitchedCrops.at(-1);
+    const transition = previousCrop
+      ? transitionByPairKey.get(buildTransitionKey(previousCrop.cropIndex, cropIndex))
+      : undefined;
+    const isForcedCrop = forcedCropIndexSet.has(cropIndex);
+
+    let overlapTrimTopPx = 0;
+    let trimMode: AssemblyTrimMode = sequenceIndex === 0 ? "initial" : "keep";
+    let overlapScore: number | null = transition?.overlapScore ?? null;
+
+    if (isForcedCrop) {
+      trimMode = "manual";
+    } else if (transition) {
+      if (transition.autoTrimApplied) {
+        overlapTrimTopPx = transition.overlapTrimCandidatePx;
+        trimMode = "auto";
+      } else if (decisions[transition.id] === "trim_overlap") {
+        overlapTrimTopPx = transition.overlapTrimCandidatePx;
+        trimMode = "review";
+      }
+    }
+
+    let remainingHeight = crop.height - overlapTrimTopPx;
+
+    if (remainingHeight < MIN_NEW_CONTENT_PX || remainingHeight / crop.height < MIN_NEW_CONTENT_RATIO) {
+      if (isForcedCrop) {
+        overlapTrimTopPx = 0;
+        remainingHeight = crop.height;
+        trimMode = "manual";
+      } else {
+        if (onProgress && (sequenceIndex === requestedOrder.length - 1 || (sequenceIndex + 1) % 4 === 0)) {
+          await onProgress({
+            stage: "rendering",
+            label: "악보 재구성 중",
+            detail: "선택한 기준으로 악보 이미지를 다시 정리하고 있습니다.",
+            progressPercent: 82 + ((sequenceIndex + 1) / Math.max(1, requestedOrder.length)) * 13,
+            current: sequenceIndex + 1,
+            total: requestedOrder.length,
+            unit: "segments"
+          });
+        }
+
+        continue;
+      }
+    }
+
+    const appendBuffer =
+      overlapTrimTopPx > 0
+        ? await sharp(cropBuffer)
+            .extract({
+              left: 0,
+              top: overlapTrimTopPx,
+              width: crop.width,
+              height: remainingHeight
+            })
+            .png()
+            .toBuffer()
+        : cropBuffer;
+
+    stitchedCrops.push({
+      frame: {
+        id: crop.frameId,
+        timestampSec: crop.timestampSec,
+        relativePath: crop.relativePath,
+        width: crop.width,
+        height: crop.height
+      },
+      sourceRelativePath: crop.relativePath,
+      cropIndex,
+      width: crop.width,
+      height: crop.height,
+      appendBuffer,
+      appendHeight: remainingHeight,
+      overlapTrimTopPx,
+      overlapScore,
+      gapBefore: sequenceIndex === 0 ? 0 : overlapTrimTopPx > 0 ? 0 : PAGE_BREAK_GAP,
+      hash: crop.hash,
+      trimMode,
+      transitionId: transition?.id
+    });
+
+    if (onProgress && (sequenceIndex === requestedOrder.length - 1 || (sequenceIndex + 1) % 4 === 0)) {
+      await onProgress({
+        stage: "rendering",
+        label: "악보 재구성 중",
+        detail: "선택한 기준으로 악보 이미지를 다시 정리하고 있습니다.",
+        progressPercent: 82 + ((sequenceIndex + 1) / Math.max(1, requestedOrder.length)) * 13,
+        current: sequenceIndex + 1,
+        total: requestedOrder.length,
+        unit: "segments"
+      });
+    }
+  }
+
+  if (stitchedCrops.length === 0) {
+    throw new Error("No stitched tab frames remained after overlap cleanup.");
+  }
+
+  return {
+    stitchedCrops,
+    orderedCropIndices: stitchedCrops.map((crop) => crop.cropIndex),
+    forcedCropIndices
+  };
+}
+
+function buildAssemblyEditorState(
+  manifest: AssemblyManifest,
+  stitchedCrops: AppendedCrop[],
+  orderedCropIndices: number[],
+  forcedCropIndices: number[]
+): AssemblyEditorState {
+  const sequence = stitchedCrops.map((crop) => ({
+    ...buildAssemblyCropAsset(manifest.crops[crop.cropIndex]),
+    trimMode: crop.trimMode,
+    overlapTrimTopPx: crop.overlapTrimTopPx,
+    overlapScore: crop.overlapScore,
+    gapBefore: crop.gapBefore,
+    transitionId: crop.transitionId
+  })) satisfies AssemblySequenceItem[];
+
+  return {
+    generatedAt: new Date().toISOString(),
+    cropCount: manifest.crops.length,
+    orderedCropIndices,
+    forcedCropIndices,
+    crops: manifest.crops.map(buildAssemblyCropAsset),
+    sequence
+  };
+}
+
+async function renderAssembledScoreFromManifest(
+  projectId: string,
+  manifest: AssemblyManifest,
+  decisions: Partial<Record<string, AssemblyReviewDecision>>,
+  options: RenderAssemblyOptions = {},
+  onProgress?: PipelineProgressReporter
+) {
+  const { stitchedCrops, orderedCropIndices, forcedCropIndices } = await buildStitchedCropsFromManifest(
+    projectId,
+    manifest,
+    decisions,
+    options,
+    onProgress
+  );
+
+  const finalWidth = manifest.normalizationWidth + SHEET_PADDING * 2;
+  const finalHeight =
+    stitchedCrops.reduce((sum, crop) => sum + crop.appendHeight + crop.gapBefore, 0) + SHEET_PADDING * 2;
+
+  let currentTop = SHEET_PADDING;
+  const composites = stitchedCrops.map((crop) => {
+    currentTop += crop.gapBefore;
+
+    const composite = {
+      input: crop.appendBuffer,
+      left: SHEET_PADDING,
+      top: currentTop
+    };
+
+    currentTop += crop.appendHeight;
+    return composite;
+  });
+
+  const assembledScoreBuffer = await sharp({
+    create: {
+      width: finalWidth,
+      height: finalHeight,
+      channels: 3,
+      background: "#fffdf8"
+    }
+  })
+    .composite(composites)
+    .png()
+    .toBuffer();
+
+  if (onProgress) {
+    await onProgress({
+      stage: "writing-output",
+      label: "결과 저장 중",
+      detail: "최종 PNG와 메타데이터를 저장하고 있습니다.",
+      progressPercent: 98
+    });
+  }
+
+  const review = buildAssemblyReviewState(manifest, decisions);
+  const editor = buildAssemblyEditorState(manifest, stitchedCrops, orderedCropIndices, forcedCropIndices);
+  const generatedAt = new Date().toISOString();
+  const scoreRelativePath = path.posix.join("output", "assembled-score.png");
+  const metadataRelativePath = path.posix.join("output", "assembled-score.json");
+
+  await writeFile(path.join(getProjectOutputDirectory(projectId), "assembled-score.png"), assembledScoreBuffer);
+  await writeFile(
+    path.join(getProjectOutputDirectory(projectId), "assembled-score.json"),
+    JSON.stringify(
+      {
+        generatedAt,
+        sourceFrameCount: manifest.sourceFrameCount,
+        stitchedFrameCount: stitchedCrops.length,
+        normalizationWidth: manifest.normalizationWidth,
+        roi: manifest.roi,
+        review: {
+          totalCount: review.totalCount,
+          pendingCount: review.pendingCount,
+          items: review.items
+        },
+        editor: {
+          orderedCropIndices,
+          forcedCropIndices
+        },
+        frames: stitchedCrops.map((crop, index) => ({
+          index,
+          cropIndex: crop.cropIndex,
+          frameId: crop.frame.id,
+          timestampSec: crop.frame.timestampSec,
+          relativePath: crop.sourceRelativePath,
+          width: crop.width,
+          height: crop.height,
+          appendedHeight: crop.appendHeight,
+          overlapTrimTopPx: crop.overlapTrimTopPx,
+          overlapScore: crop.overlapScore,
+          gapBefore: crop.gapBefore,
+          trimMode: crop.trimMode,
+          transitionId: crop.transitionId,
+          hash: crop.hash
+        }))
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  return {
+    assembledScore: {
+      relativePath: scoreRelativePath,
+      metadataPath: metadataRelativePath,
+      generatedAt,
+      width: finalWidth,
+      height: finalHeight,
+      sourceFrameCount: manifest.sourceFrameCount,
+      stitchedFrameCount: stitchedCrops.length
+    },
+    assemblyEditor: editor,
+    assemblyReview: review
+  } satisfies AssembleProjectScoreResult;
+}
+
+async function loadAssemblyManifest(projectId: string) {
+  const manifestRaw = await readFile(getProjectAssetAbsolutePath(projectId, ASSEMBLY_MANIFEST_PATH), "utf8");
+  return JSON.parse(manifestRaw) as AssemblyManifest;
+}
+
+export async function applyAssemblyReviewDecisions(
+  projectId: string,
+  decisions: Partial<Record<string, AssemblyReviewDecision>>,
+  manualEdit?: AssemblyManualEditState,
+  onProgress?: PipelineProgressReporter
+) {
+  const manifest = await loadAssemblyManifest(projectId);
+  return renderAssembledScoreFromManifest(
+    projectId,
+    manifest,
+    decisions,
+    {
+      orderedCropIndices: manualEdit?.orderedCropIndices,
+      forcedCropIndices: manualEdit?.forcedCropIndices
+    },
+    onProgress
+  );
+}
+
+export async function applyAssemblyManualEdits(
+  projectId: string,
+  decisions: Partial<Record<string, AssemblyReviewDecision>>,
+  manualEdit: AssemblyManualEditState,
+  onProgress?: PipelineProgressReporter
+) {
+  const manifest = await loadAssemblyManifest(projectId);
+  return renderAssembledScoreFromManifest(
+    projectId,
+    manifest,
+    decisions,
+    {
+      orderedCropIndices: manualEdit.orderedCropIndices,
+      forcedCropIndices: manualEdit.forcedCropIndices
+    },
+    onProgress
+  );
 }
 
 export async function assembleProjectScore(
@@ -461,10 +934,13 @@ export async function assembleProjectScore(
   frames: ProjectFrameAsset[],
   roi: RoiSelection,
   onProgress?: PipelineProgressReporter
-): Promise<AssembledScoreAsset> {
+) {
   await ensureProjectSubdirectories(projectId);
 
   const outputDirectory = getProjectOutputDirectory(projectId);
+  const normalizedCropsDirectory = path.join(outputDirectory, "normalized-crops");
+  await mkdir(normalizedCropsDirectory, { recursive: true });
+
   const preparedCrops: PreparedCrop[] = [];
 
   for (const [frameIndex, frame] of frames.entries()) {
@@ -486,7 +962,6 @@ export async function assembleProjectScore(
         width: cropWidth,
         height: cropHeight
       })
-      .trim()
       .flatten({ background: "#ffffff" })
       .png()
       .toBuffer();
@@ -537,187 +1012,115 @@ export async function assembleProjectScore(
   }
 
   const targetWidth = selectNormalizationWidth(preparedCrops.map((crop) => crop.width));
-
   const normalizedCrops: NormalizedCrop[] = [];
 
   for (const [cropIndex, crop] of preparedCrops.entries()) {
-      const normalizedBuffer = await sharp(crop.buffer)
-        .resize({
-          width: targetWidth
-        })
-        .png()
-        .toBuffer();
-      const normalizedMetadata = await sharp(normalizedBuffer).metadata();
+    const normalizedBuffer = await sharp(crop.buffer)
+      .resize({
+        width: targetWidth
+      })
+      .png()
+      .toBuffer();
+    const normalizedMetadata = await sharp(normalizedBuffer).metadata();
+    const storedFileName = `crop-${String(cropIndex).padStart(4, "0")}.png`;
+    const relativePath = path.posix.join(NORMALIZED_CROPS_DIRECTORY, storedFileName);
 
-      normalizedCrops.push({
-        ...crop,
-        buffer: normalizedBuffer,
-        width: normalizedMetadata.width ?? targetWidth,
-        height: normalizedMetadata.height ?? crop.height,
-        analysis: await computeAnalysisImage(
-          normalizedBuffer,
-          normalizedMetadata.width ?? targetWidth,
-          normalizedMetadata.height ?? crop.height
-        )
-      });
+    await writeFile(path.join(normalizedCropsDirectory, storedFileName), normalizedBuffer);
 
-      if (onProgress && (cropIndex === 0 || cropIndex === preparedCrops.length - 1 || (cropIndex + 1) % 3 === 0)) {
-        await onProgress({
-          stage: "normalizing",
-          label: "크기 정렬 중",
-          detail: "마디 이미지 폭을 맞추고 있습니다.",
-          progressPercent: 64 + ((cropIndex + 1) / Math.max(1, preparedCrops.length)) * 14,
-          current: cropIndex + 1,
-          total: preparedCrops.length,
-          unit: "segments"
-        });
-      }
-  }
-
-  const stitchedCrops: AppendedCrop[] = [];
-
-  for (const [cropIndex, crop] of normalizedCrops.entries()) {
-    const previousCrop = stitchedCrops.at(-1);
-
-    if (!previousCrop) {
-      stitchedCrops.push({
-        ...crop,
-        appendBuffer: crop.buffer,
-        appendHeight: crop.height,
-        overlapTrimTopPx: 0,
-        overlapScore: null,
-        gapBefore: 0
-      });
-      continue;
-    }
-
-    const overlapMatch = findVerticalOverlap(previousCrop.analysis, crop.analysis);
-    const overlapTrimTopPx = overlapMatch
-      ? Math.min(crop.height - 1, Math.max(0, Math.round((overlapMatch.overlapRows / crop.analysis.height) * crop.height)))
-      : 0;
-    const remainingHeight = crop.height - overlapTrimTopPx;
-
-    if (remainingHeight < MIN_NEW_CONTENT_PX || remainingHeight / crop.height < MIN_NEW_CONTENT_RATIO) {
-      continue;
-    }
-
-    const appendBuffer =
-      overlapTrimTopPx > 0
-        ? await sharp(crop.buffer)
-            .extract({
-              left: 0,
-              top: overlapTrimTopPx,
-              width: crop.width,
-              height: remainingHeight
-            })
-            .png()
-            .toBuffer()
-        : crop.buffer;
-
-    stitchedCrops.push({
+    normalizedCrops.push({
       ...crop,
-      appendBuffer,
-      appendHeight: remainingHeight,
-      overlapTrimTopPx,
-      overlapScore: overlapMatch?.score ?? null,
-      gapBefore: overlapTrimTopPx > 0 ? 0 : PAGE_BREAK_GAP
+      buffer: normalizedBuffer,
+      width: normalizedMetadata.width ?? targetWidth,
+      height: normalizedMetadata.height ?? crop.height,
+      relativePath,
+      analysis: await computeAnalysisImage(
+        normalizedBuffer,
+        normalizedMetadata.width ?? targetWidth,
+        normalizedMetadata.height ?? crop.height
+      )
     });
 
-    if (onProgress && (cropIndex === 0 || cropIndex === normalizedCrops.length - 1 || (cropIndex + 1) % 3 === 0)) {
+    if (onProgress && (cropIndex === 0 || cropIndex === preparedCrops.length - 1 || (cropIndex + 1) % 3 === 0)) {
       await onProgress({
-        stage: "stitching",
-        label: "악보 조합 중",
-        detail: "중복과 겹침을 정리하며 하나의 악보로 합치고 있습니다.",
-        progressPercent: 80 + ((cropIndex + 1) / Math.max(1, normalizedCrops.length)) * 15,
+        stage: "normalizing",
+        label: "크기 정렬 중",
+        detail: "마디 이미지 폭을 맞추고 있습니다.",
+        progressPercent: 64 + ((cropIndex + 1) / Math.max(1, preparedCrops.length)) * 14,
         current: cropIndex + 1,
-        total: normalizedCrops.length,
+        total: preparedCrops.length,
         unit: "segments"
       });
     }
   }
 
-  if (stitchedCrops.length === 0) {
-    throw new Error("No stitched tab frames remained after overlap cleanup.");
-  }
+  const manifestCrops = normalizedCrops.map((crop, index) => ({
+    index,
+    frameId: crop.frame.id,
+    timestampSec: crop.frame.timestampSec,
+    relativePath: crop.relativePath,
+    width: crop.width,
+    height: crop.height,
+    hash: crop.hash
+  })) satisfies CropManifestEntry[];
 
-  const finalWidth = targetWidth + SHEET_PADDING * 2;
-  const finalHeight =
-    stitchedCrops.reduce((sum, crop) => sum + crop.appendHeight + crop.gapBefore, 0) + SHEET_PADDING * 2;
+  const transitions: TransitionManifestEntry[] = [];
 
-  let currentTop = SHEET_PADDING;
-  const composites = stitchedCrops.map((crop) => {
-    currentTop += crop.gapBefore;
+  for (let cropIndex = 1; cropIndex < normalizedCrops.length; cropIndex += 1) {
+    const previousCrop = normalizedCrops[cropIndex - 1];
+    const currentCrop = normalizedCrops[cropIndex];
+    const overlapMatch = findVerticalOverlap(previousCrop.analysis, currentCrop.analysis);
 
-    const composite = {
-      input: crop.appendBuffer,
-      left: SHEET_PADDING,
-      top: currentTop
-    };
-
-    currentTop += crop.appendHeight;
-    return composite;
-  });
-
-  const assembledScoreBuffer = await sharp({
-    create: {
-      width: finalWidth,
-      height: finalHeight,
-      channels: 3,
-      background: "#fffdf8"
+    if (!overlapMatch) {
+      continue;
     }
-  })
-    .composite(composites)
-    .png()
-    .toBuffer();
 
-  if (onProgress) {
-    await onProgress({
-      stage: "writing-output",
-      label: "결과 저장 중",
-      detail: "최종 PNG와 메타데이터를 저장하고 있습니다.",
-      progressPercent: 98
+    const overlapTrimCandidatePx = Math.min(
+      currentCrop.height - 1,
+      Math.max(0, Math.round((overlapMatch.overlapRows / currentCrop.analysis.height) * currentCrop.height))
+    );
+    const overlapTrimRatio = overlapTrimCandidatePx / Math.max(1, currentCrop.height);
+
+    if (
+      overlapTrimCandidatePx <= 0 ||
+      overlapTrimRatio > MAX_OVERLAP_TRIM_RATIO ||
+      overlapMatch.score > REVIEW_OVERLAP_SCORE
+    ) {
+      continue;
+    }
+
+    const previousEntry = manifestCrops[cropIndex - 1];
+    const currentEntry = manifestCrops[cropIndex];
+    const autoTrimApplied = isSafeAutomaticTrim(overlapMatch.score, overlapTrimRatio);
+
+    transitions.push({
+      id: buildTransitionId(previousEntry, currentEntry),
+      previousCropIndex: cropIndex - 1,
+      currentCropIndex: cropIndex,
+      overlapScore: overlapMatch.score,
+      overlapTrimCandidatePx,
+      overlapTrimRatio,
+      autoTrimApplied,
+      recommendedDecision: "keep_both",
+      reason: buildReviewReason(overlapMatch.score, overlapTrimRatio)
     });
   }
 
-  const scoreRelativePath = path.posix.join("output", "assembled-score.png");
-  const metadataRelativePath = path.posix.join("output", "assembled-score.json");
+  const manifest: AssemblyManifest = {
+    generatedAt: new Date().toISOString(),
+    sourceFrameCount: frames.length,
+    normalizationWidth: targetWidth,
+    roi,
+    crops: manifestCrops,
+    transitions
+  };
 
-  await writeFile(path.join(outputDirectory, "assembled-score.png"), assembledScoreBuffer);
   await writeFile(
-    path.join(outputDirectory, "assembled-score.json"),
-    JSON.stringify(
-      {
-        generatedAt: new Date().toISOString(),
-        sourceFrameCount: frames.length,
-        stitchedFrameCount: stitchedCrops.length,
-        normalizationWidth: targetWidth,
-        roi,
-        frames: stitchedCrops.map((crop, index) => ({
-          index,
-          timestampSec: crop.frame.timestampSec,
-          relativePath: crop.frame.relativePath,
-          width: crop.width,
-          height: crop.height,
-          appendedHeight: crop.appendHeight,
-          overlapTrimTopPx: crop.overlapTrimTopPx,
-          overlapScore: crop.overlapScore,
-          gapBefore: crop.gapBefore,
-          hash: crop.hash
-        }))
-      },
-      null,
-      2
-    ),
+    getProjectAssetAbsolutePath(projectId, ASSEMBLY_MANIFEST_PATH),
+    JSON.stringify(manifest, null, 2),
     "utf8"
   );
 
-  return {
-    relativePath: scoreRelativePath,
-    metadataPath: metadataRelativePath,
-    generatedAt: new Date().toISOString(),
-    width: finalWidth,
-    height: finalHeight,
-    sourceFrameCount: frames.length,
-    stitchedFrameCount: stitchedCrops.length
-  };
+  return renderAssembledScoreFromManifest(projectId, manifest, {}, {}, onProgress);
 }
+
+export type { AssembleProjectScoreResult };

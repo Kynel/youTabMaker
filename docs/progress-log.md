@@ -51,6 +51,14 @@
 - fullscreen tab viewer now fits the score to the available width and prevents horizontal scrolling
 - ROI selection overlay now uses a darker neutral border, subtler dimming, and a less aggressive label style
 - Vercel deployments now use a writable temp storage root instead of a project-local `.data` path
+- removed per-crop `trim()` and capped overlap trimming so stitched scores no longer clip the top of mid-score lines
+- assembly now stores normalized crop assets plus an assembly manifest so suspicious overlap transitions can be reviewed without recapturing the whole video
+- ambiguous overlap candidates now stay in the score by default, while a dedicated review route can re-stitch the final tab after quick human decisions
+- the workbench now includes an overlap review section with side-by-side previous/current crop previews and `둘 다 유지` / `겹침 제거` decisions
+- final PNG export is now locked until review decisions are complete and saved
+- the assembly pipeline now persists an editor model of the current stitched order so manual add/remove fixes can re-render the final score without re-capturing the video
+- a dedicated manual-edit route now supports deleting a stitched segment and inserting an omitted crop back into the score in real time
+- the workbench now highlights editable gaps, shows previous/next context around a suspected omission, and lets the user preview nearby tab crops before adding them
 - project documentation and agent handoff docs
 
 ### Verification
@@ -64,6 +72,8 @@
 - Confirmed `GET /` and `HEAD /` both returned `200 OK`
 - Verified `POST /api/projects/:id/capture` extracts full-video frames
 - Verified `POST /api/projects/:id/assemble` produces a stitched score and JSON metadata
+- Verified `POST /api/projects/:id/review` re-renders the final score from saved normalized crops and manifest data
+- Verified `POST /api/projects/:id/manual-edit` removes and re-adds stitched tab segments using the saved manifest/editor state
 - Re-verified `POST /api/projects/draft-df510cbf/assemble` after overlap-aware stitching changes
 - Confirmed `draft-df510cbf` now assembles `261` source frames into `31` stitched score segments
 - Confirmed `GET /api/projects/draft-df510cbf/assets/output/assembled-score.png` returns `200 OK`
@@ -79,4 +89,6 @@
 - improve repeated-section detection beyond local chronological overlap cleanup
 - implement OCR on the stitched score pipeline
 - add richer export formats and review tooling
+- improve review-candidate detection so more real repeated-bar edge cases surface automatically
+- improve omission-gap detection so more real-world dropped systems are flagged automatically without user inspection
 - improve ROI auto-detection and repeated-section handling

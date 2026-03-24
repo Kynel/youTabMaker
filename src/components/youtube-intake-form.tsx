@@ -78,6 +78,8 @@ export function YouTubeIntakeForm({
     ? "이전 작업 불러오는 중"
     : isCapturing
       ? "프레임 추출 중"
+      : project?.assemblyReview?.pendingCount
+        ? `검수 ${project.assemblyReview.pendingCount}`
       : project?.assembledScore
         ? `완성 ${project.assembledScore.stitchedFrameCount}`
         : project?.frames?.length

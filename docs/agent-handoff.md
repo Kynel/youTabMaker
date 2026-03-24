@@ -17,9 +17,17 @@ The repository was empty at the start of this session. It now contains a web-fir
 - the fullscreen tab viewer is width-fitted to the panel and should no longer introduce horizontal scrolling
 - the ROI selection overlay on the source frame now uses a dark border, layered dimming, and a neutral label instead of the older red highlight
 - Vercel deployments use an OS temp directory for draft storage so the app does not fail immediately on a read-only filesystem
+- the score assembly pipeline no longer trims each ROI crop individually, and overlap trimming is capped to prevent clipped top portions in mid-score systems
+- score assembly now persists normalized crop PNGs plus an `output/assembly-manifest.json` file so the final tab can be re-stitched without reprocessing the entire video
+- ambiguous overlap candidates are now kept by default and exposed through `project.assemblyReview`, while only high-confidence overlaps are removed automatically
+- `POST /api/projects/[projectId]/review` applies saved `둘 다 유지` / `겹침 제거` review decisions and regenerates the final score from the manifest
+- `project.assemblyEditor` now exposes the current stitched crop order plus the full normalized-crop catalog, and `project.assemblyManualEdit` stores user-driven insert/remove fixes
+- `POST /api/projects/[projectId]/manual-edit` re-renders the final score from a user-supplied crop order and forced-insert list, so omitted tab systems can be added back without re-running capture
 - a workspace reset action clears the current UI state and removes the last-project pointer from local storage
 - the UI is currently intentionally stripped down to monochrome black/white boxes with square 1px borders and tight spacing
 - long-running capture and assemble routes now write `project.processing` status updates, and the UI polls them to show a full-screen dimmed progress overlay
+- the ROI workbench now has a fast overlap-review section with side-by-side previous/current crop previews, a one-click recommendation filler, and PNG export locking until review is resolved
+- the ROI workbench now also has a manual edit section that shows gap markers between stitched segments, lets the user open a gap, compare previous/next context, preview nearby candidate crops, and add/remove segments immediately
 - documentation for product scope, architecture, and implementation phases
 
 ## Important Product Assumptions
@@ -40,10 +48,10 @@ The repository was empty at the start of this session. It now contains a web-fir
 
 ## Recommended Next Steps
 
-1. Improve repeated-section handling without collapsing intentionally repeated musical phrases.
+1. Improve omission-gap and review-candidate detection so more real repeated-bar or dropped-system edge cases are surfaced automatically.
 2. Add ROI auto-detection for typical lower-third tab overlays.
 3. Build a tab-specific OCR pass for the stitched score pipeline.
-4. Add a review editor before exporting any final tab representation.
+4. Add keyboard shortcuts or batched actions for faster manual editing on large projects.
 5. Add structured note data and playback only after OCR quality is acceptable.
 
 ## Verified Commands
@@ -56,6 +64,8 @@ The repository was empty at the start of this session. It now contains a web-fir
 - local `GET /` and `HEAD /` smoke test against `http://127.0.0.1:3000`
 - `POST /api/projects/:id/capture`
 - `POST /api/projects/:id/assemble`
+- `POST /api/projects/:id/manual-edit`
+- `POST /api/projects/:id/review`
 - re-assembled project `draft-df510cbf` with `261` source frames into `31` stitched score segments
 
 ## Cautions
@@ -65,7 +75,10 @@ The repository was empty at the start of this session. It now contains a web-fir
 - Keep the stitched-image fallback healthy even after URL processing is added.
 - The current ROI is assumed to stay spatially stable across the video.
 - The current overlap cleanup is local and chronological. It should not be treated as full repeated-section detection yet.
+- The new review UI exists, but the heuristic that decides which transitions become review items is still conservative and should be tuned with more real-world tab videos.
+- The manual edit UI works even when the omission was not auto-detected, but the current gap hinting is still based on gaps in the stitched crop indices rather than true musical bar semantics.
 - The captured-frame strip and final score preview are intentionally height-limited so the page does not explode on long videos.
 - The ROI preview defaults to a dark background, but the user can switch between black and white backgrounds from the preview card.
 - The reset action is a UI/session reset. It does not currently delete stored project files on disk.
 - Download progress from `yt-dlp` is stage-based and best-effort, while frame extraction and score assembly have more granular progress updates.
+- If the dev server starts throwing `Cannot find module './331.js'`-style errors after repeated build/dev cycles, clear `.next` or restart `npm run dev` before assuming the page code is broken.

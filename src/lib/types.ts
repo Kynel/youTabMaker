@@ -43,6 +43,65 @@ export interface AssembledScoreAsset {
   stitchedFrameCount: number;
 }
 
+export type AssemblyTrimMode = "initial" | "auto" | "review" | "keep" | "manual";
+
+export interface AssemblyCropAsset {
+  cropIndex: number;
+  frameId: string;
+  timestampSec: number;
+  relativePath: string;
+  width: number;
+  height: number;
+}
+
+export interface AssemblySequenceItem extends AssemblyCropAsset {
+  trimMode: AssemblyTrimMode;
+  overlapTrimTopPx: number;
+  overlapScore: number | null;
+  gapBefore: number;
+  transitionId?: string;
+}
+
+export type AssemblyReviewDecision = "keep_both" | "trim_overlap";
+
+export interface AssemblyReviewItem {
+  id: string;
+  previousFrameId: string;
+  previousTimestampSec: number;
+  previousCropRelativePath: string;
+  currentFrameId: string;
+  currentTimestampSec: number;
+  currentCropRelativePath: string;
+  overlapScore: number;
+  overlapTrimCandidatePx: number;
+  overlapTrimRatio: number;
+  reason: string;
+  recommendedDecision: AssemblyReviewDecision;
+  decision?: AssemblyReviewDecision;
+}
+
+export interface AssemblyReviewState {
+  generatedAt: string;
+  totalCount: number;
+  pendingCount: number;
+  items: AssemblyReviewItem[];
+}
+
+export interface AssemblyManualEditState {
+  updatedAt: string;
+  orderedCropIndices: number[];
+  forcedCropIndices: number[];
+}
+
+export interface AssemblyEditorState {
+  generatedAt: string;
+  cropCount: number;
+  orderedCropIndices: number[];
+  forcedCropIndices: number[];
+  crops: AssemblyCropAsset[];
+  sequence: AssemblySequenceItem[];
+}
+
 export interface SavedRoi {
   selection: RoiSelection;
   selectionMode: "manual" | "bottom-band-suggestion";
@@ -87,6 +146,9 @@ export interface DraftProject {
   videoAsset?: VideoAsset;
   frames?: ProjectFrameAsset[];
   assembledScore?: AssembledScoreAsset;
+  assemblyEditor?: AssemblyEditorState;
+  assemblyManualEdit?: AssemblyManualEditState;
+  assemblyReview?: AssemblyReviewState;
   sourceFrame?: SourceFrameAsset;
   roi?: SavedRoi;
   processing?: ProjectProcessingStatus;

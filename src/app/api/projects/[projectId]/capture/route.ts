@@ -51,6 +51,9 @@ export async function POST(
           videoAsset,
           frames,
           assembledScore: undefined,
+          assemblyEditor: undefined,
+          assemblyManualEdit: undefined,
+          assemblyReview: undefined,
           processing: undefined
         },
         inspectRuntime()

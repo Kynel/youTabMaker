@@ -73,13 +73,21 @@ export async function POST(
       progressPercent: 3
     });
 
-    const assembledScore = await assembleProjectScore(projectId, project.frames, payload.roi, progress.report);
+    const { assembledScore, assemblyEditor, assemblyReview } = await assembleProjectScore(
+      projectId,
+      project.frames,
+      payload.roi,
+      progress.report
+    );
     const updatedProject = await updateDraftProject(projectId, (currentProject) =>
       applyRuntimeToProject(
         {
           ...currentProject,
           roi: savedRoi,
           assembledScore,
+          assemblyEditor,
+          assemblyManualEdit: undefined,
+          assemblyReview,
           processing: undefined
         },
         inspectRuntime()

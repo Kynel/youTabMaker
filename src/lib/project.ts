@@ -29,7 +29,7 @@ function buildPipeline(runtime: RuntimeInspection): PipelineStep[] {
       id: "assembly",
       label: "Score assembly",
       description:
-        "The current pipeline crops the saved ROI across the full video, removes near-duplicates, normalizes sizes, and stitches one long score image.",
+        "The current pipeline crops the saved ROI across the full video, removes near-duplicates, normalizes sizes, auto-trims only confident overlaps, sends ambiguous repeats to review, and supports manual add/remove fixes before export.",
       status: "ready"
     },
     {
