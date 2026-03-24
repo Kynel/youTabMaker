@@ -1,0 +1,9 @@
+.data
+.git
+.next
+.vercel
+coverage
+dist
+node_modules
+npm-debug.log*
+tsconfig.tsbuildinfo
