@@ -62,7 +62,12 @@
 - the workbench is now split into `유튜브 변환` and `악보 수정` tabs, so ROI work and score-edit work no longer compete on one crowded screen
 - the `악보 수정` tab now opens with a large full-width `전체 Tab` panel so Manual Edit decisions can be made while looking at the real stitched score layout
 - the `악보 수정` tab now lets the user click stitched regions directly on the large score to remove them, or click in-score `+` handles between regions to open insertion candidates
-- the in-score `+` action now opens a large popup anchored on the score, and the popup lists the full 1-second crop catalog instead of a tiny recommendation subset
+- the in-score `+` action now opens a large centered full-screen popup, and the popup limits candidates to 1-second crops captured strictly between the selected previous/next timestamps
+- the add-candidate popup now uses larger crop cards so the user can compare omitted tab systems more quickly
+- clicking a candidate crop in the add popup now switches the full popup into a focused preview view with `최소` / `이 조각 추가`, and clicking the backdrop returns to the crop selection list
+- the add popup no longer shows the old `프레임` button for each candidate or for the start/end context cards
+- the start/end context cards in the add popup are now visually emphasized so the insertion boundaries read more clearly
+- the start/end context cards are now also clickable for the same enlarged modal preview, but they stay reference-only and never expose `추가`
 - edit mode now keeps each stitched segment's timestamp visible at the top-left of the large score overlay
 - project documentation and agent handoff docs
 

@@ -28,6 +28,10 @@ interface RawSelection {
 
 type PreviewBackground = "dark" | "light";
 type ScoreColorMode = "original" | "inverted";
+type GapPreviewTarget =
+  | { kind: "candidate"; cropIndex: number }
+  | { kind: "previous" }
+  | { kind: "next" };
 
 interface ManualEditGap {
   key: string;
@@ -121,49 +125,27 @@ function buildManualEditGaps(editor: AssemblyEditorState | undefined): ManualEdi
   }
 
   const includedCropIndices = new Set(editor.orderedCropIndices);
-  const excludedCrops = editor.crops.filter((crop) => !includedCropIndices.has(crop.cropIndex));
+  const excludedCrops = editor.crops
+    .filter((crop) => !includedCropIndices.has(crop.cropIndex))
+    .sort((left, right) => left.timestampSec - right.timestampSec || left.cropIndex - right.cropIndex);
 
   return Array.from({ length: editor.sequence.length + 1 }, (_, gapIndex) => {
     const previous = gapIndex > 0 ? editor.sequence[gapIndex - 1] ?? null : null;
     const next = gapIndex < editor.sequence.length ? editor.sequence[gapIndex] ?? null : null;
-    const previousCropIndex = previous?.cropIndex ?? null;
-    const nextCropIndex = next?.cropIndex ?? null;
+    const previousTimestampSec = previous?.timestampSec ?? null;
+    const nextTimestampSec = next?.timestampSec ?? null;
     const primaryCandidates = excludedCrops.filter(
       (crop) =>
-        (previousCropIndex == null || crop.cropIndex > previousCropIndex) &&
-        (nextCropIndex == null || crop.cropIndex < nextCropIndex)
+        (previousTimestampSec == null || crop.timestampSec > previousTimestampSec) &&
+        (nextTimestampSec == null || crop.timestampSec < nextTimestampSec)
     );
 
-    let candidateCropIndices = primaryCandidates.map((crop) => crop.cropIndex);
-
-    if (candidateCropIndices.length === 0) {
-      const center =
-        previousCropIndex != null && nextCropIndex != null
-          ? (previousCropIndex + nextCropIndex) / 2
-          : previousCropIndex != null
-            ? previousCropIndex + 1
-            : nextCropIndex != null
-              ? nextCropIndex - 1
-              : 0;
-
-      candidateCropIndices = [...excludedCrops]
-        .sort(
-          (left, right) =>
-            Math.abs(left.cropIndex - center) - Math.abs(right.cropIndex - center) ||
-            left.cropIndex - right.cropIndex
-        )
-        .slice(0, 8)
-        .map((crop) => crop.cropIndex);
-    } else {
-      candidateCropIndices = candidateCropIndices.slice(0, 8);
-    }
-
     return {
-      key: buildGapKey(previousCropIndex, nextCropIndex),
+      key: buildGapKey(previous?.cropIndex ?? null, next?.cropIndex ?? null),
       previous,
       next,
       missingBetweenCount: primaryCandidates.length,
-      candidateCropIndices
+      candidateCropIndices: primaryCandidates.map((crop) => crop.cropIndex)
     } satisfies ManualEditGap;
   });
 }
@@ -286,6 +268,7 @@ export function FrameSelectionLab({
   const [reviewDraft, setReviewDraft] = useState<Record<string, AssemblyReviewDecision>>({});
   const [activeGapKey, setActiveGapKey] = useState<string | null>(null);
   const [activeScoreCropIndex, setActiveScoreCropIndex] = useState<number | null>(null);
+  const [activeGapPreviewTarget, setActiveGapPreviewTarget] = useState<GapPreviewTarget | null>(null);
 
   const frames = project?.frames ?? [];
   const projectId = project?.id ?? null;
@@ -293,19 +276,23 @@ export function FrameSelectionLab({
   const reviewItems = project?.assemblyReview?.items ?? [];
   const manualEditGaps = buildManualEditGaps(editor);
   const activeGap = manualEditGaps.find((gap) => gap.key === activeGapKey) ?? null;
+  const activeGapCandidateCrops =
+    activeGap && editor
+      ? activeGap.candidateCropIndices
+          .map((cropIndex) => findCropByIndex(editor.crops, cropIndex))
+          .filter((crop): crop is AssemblyCropAsset => Boolean(crop))
+      : [];
+  const activeGapPreviewItem =
+    activeGap && activeGapPreviewTarget
+      ? activeGapPreviewTarget.kind === "previous"
+        ? activeGap.previous
+        : activeGapPreviewTarget.kind === "next"
+          ? activeGap.next
+          : activeGapCandidateCrops.find((crop) => crop.cropIndex === activeGapPreviewTarget.cropIndex) ?? null
+      : null;
   const selectedSequenceItem =
     activeScoreCropIndex != null ? editor?.sequence.find((item) => item.cropIndex === activeScoreCropIndex) ?? null : null;
   const scoreOverlayLayout = buildScoreOverlayLayout(editor, project?.assembledScore, manualEditGaps);
-  const orderedCropIndexSet = new Set(editor?.orderedCropIndices ?? []);
-  const activeGapRegion = activeGapKey
-    ? scoreOverlayLayout.gaps.find((gapRegion) => gapRegion.key === activeGapKey) ?? null
-    : null;
-  const activeGapPopupPosition = activeGapRegion
-    ? {
-        left: `${clampNumber(activeGapRegion.leftPercent + activeGapRegion.widthPercent / 2, 18, 82)}%`,
-        top: `${clampNumber(activeGapRegion.topPercent + activeGapRegion.heightPercent / 2, 18, 82)}%`
-      }
-    : null;
   const assembledScoreUrl =
     project?.assembledScore && project
       ? `${projectAssetUrl(project.id, project.assembledScore.relativePath)}?v=${encodeURIComponent(
@@ -432,6 +419,7 @@ export function FrameSelectionLab({
 
   useEffect(() => {
     if (!activeGapKey) {
+      setActiveGapPreviewTarget(null);
       return;
     }
 
@@ -439,6 +427,36 @@ export function FrameSelectionLab({
       setActiveGapKey(null);
     }
   }, [activeGapKey, manualEditGaps]);
+
+  useEffect(() => {
+    if (!activeGapKey) {
+      setActiveGapPreviewTarget(null);
+      return;
+    }
+  }, [activeGapKey]);
+
+  useEffect(() => {
+    if (!activeGap || !activeGapPreviewTarget) {
+      return;
+    }
+
+    if (activeGapPreviewTarget.kind === "previous" && !activeGap.previous) {
+      setActiveGapPreviewTarget(null);
+      return;
+    }
+
+    if (activeGapPreviewTarget.kind === "next" && !activeGap.next) {
+      setActiveGapPreviewTarget(null);
+      return;
+    }
+
+    if (
+      activeGapPreviewTarget.kind === "candidate" &&
+      !activeGapCandidateCrops.some((crop) => crop.cropIndex === activeGapPreviewTarget.cropIndex)
+    ) {
+      setActiveGapPreviewTarget(null);
+    }
+  }, [activeGap, activeGapCandidateCrops, activeGapPreviewTarget]);
 
   useEffect(() => {
     if (activeScoreCropIndex == null) {
@@ -1551,127 +1569,6 @@ export function FrameSelectionLab({
                       </button>
                     ))}
                   </div>
-                  {activeGap && activeGapPopupPosition ? (
-                    <>
-                      <button
-                        className="score-popup-backdrop"
-                        type="button"
-                        aria-label="추가 팝업 닫기"
-                        onClick={() => setActiveGapKey(null)}
-                      />
-                      <div
-                        className="score-gap-popup"
-                        style={activeGapPopupPosition}
-                        role="dialog"
-                        aria-modal="false"
-                        aria-label="추가할 조각 선택"
-                        onClick={(event) => event.stopPropagation()}
-                      >
-                        <div className="row-between">
-                          <div className="stack-xs">
-                            <p className="section-label">추가할 조각 선택</p>
-                            <p className="muted">1초 간격으로 잘라둔 전체 crop를 시간순으로 모두 보여줍니다.</p>
-                          </div>
-                          <button className="ghost-button" type="button" onClick={() => setActiveGapKey(null)}>
-                            닫기
-                          </button>
-                        </div>
-
-                        <div className="review-preview-grid">
-                          <div className={reviewFrameShellClassName}>
-                            <p className="review-frame-label">
-                              {activeGap.previous ? `이전 ${formatSeconds(activeGap.previous.timestampSec)}` : "시작"}
-                            </p>
-                            {activeGap.previous ? (
-                              <>
-                                <img
-                                  className={reviewImageClassName}
-                                  src={projectAssetUrl(project.id, activeGap.previous.relativePath)}
-                                  alt="Previous score segment"
-                                />
-                                <div className="action-row">
-                                  <button
-                                    className="ghost-button"
-                                    type="button"
-                                    onClick={() => openFrameInConvertWorkspace(activeGap.previous?.frameId ?? null)}
-                                  >
-                                    프레임
-                                  </button>
-                                </div>
-                              </>
-                            ) : (
-                              <p className="preview-empty">악보 시작 지점</p>
-                            )}
-                          </div>
-                          <div className={reviewFrameShellClassName}>
-                            <p className="review-frame-label">
-                              {activeGap.next ? `다음 ${formatSeconds(activeGap.next.timestampSec)}` : "끝"}
-                            </p>
-                            {activeGap.next ? (
-                              <>
-                                <img
-                                  className={reviewImageClassName}
-                                  src={projectAssetUrl(project.id, activeGap.next.relativePath)}
-                                  alt="Next score segment"
-                                />
-                                <div className="action-row">
-                                  <button
-                                    className="ghost-button"
-                                    type="button"
-                                    onClick={() => openFrameInConvertWorkspace(activeGap.next?.frameId ?? null)}
-                                  >
-                                    프레임
-                                  </button>
-                                </div>
-                              </>
-                            ) : (
-                              <p className="preview-empty">악보 마지막 뒤</p>
-                            )}
-                          </div>
-                        </div>
-
-                        <div className="gap-popup-grid">
-                          {(editor?.crops ?? []).map((crop) => {
-                            const isAlreadyIncluded = orderedCropIndexSet.has(crop.cropIndex);
-
-                            return (
-                              <article
-                                className={isAlreadyIncluded ? "candidate-card stack-xs is-included" : "candidate-card stack-xs"}
-                                key={crop.cropIndex}
-                              >
-                                <div className={reviewFrameShellClassName}>
-                                  <p className="review-frame-label">{formatSeconds(crop.timestampSec)}</p>
-                                  <img
-                                    className={reviewImageClassName}
-                                    src={projectAssetUrl(project.id, crop.relativePath)}
-                                    alt="Candidate score segment"
-                                    loading="lazy"
-                                  />
-                                </div>
-                                <div className="action-row">
-                                  <button
-                                    className="ghost-button"
-                                    type="button"
-                                    onClick={() => openFrameInConvertWorkspace(crop.frameId)}
-                                  >
-                                    프레임
-                                  </button>
-                                  <button
-                                    className="primary-button"
-                                    type="button"
-                                    onClick={() => void insertCropIntoGap(activeGap, crop.cropIndex)}
-                                    disabled={isApplyingManualEdit || isAlreadyIncluded}
-                                  >
-                                    {isAlreadyIncluded ? "포함됨" : "추가"}
-                                  </button>
-                                </div>
-                              </article>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    </>
-                  ) : null}
                 </div>
               </div>
 
@@ -1748,6 +1645,198 @@ export function FrameSelectionLab({
                 style={{ width: `${clampProgress(processingState.progressPercent)}%` }}
               />
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {activeGap ? (
+        <div
+          className="score-popup-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label="추가할 조각 선택"
+          onClick={() => {
+            if (activeGapPreviewItem) {
+              setActiveGapPreviewTarget(null);
+              return;
+            }
+
+            setActiveGapKey(null);
+          }}
+        >
+          <div
+            className={activeGapPreviewItem ? "score-gap-popup is-preview-mode" : "score-gap-popup"}
+            onClick={(event) => event.stopPropagation()}
+          >
+            {activeGapPreviewItem ? (
+              <div className="gap-preview-stage stack-sm">
+                <div className="row-between">
+                  <div className="stack-xs">
+                    <p className="section-label">
+                      {activeGapPreviewTarget?.kind === "candidate"
+                        ? "선택한 조각"
+                        : activeGapPreviewTarget?.kind === "previous"
+                          ? "이전 기준 조각"
+                          : "다음 기준 조각"}
+                    </p>
+                    <p className="muted">{formatSeconds(activeGapPreviewItem.timestampSec)}</p>
+                  </div>
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    onClick={() => setActiveGapPreviewTarget(null)}
+                  >
+                    최소
+                  </button>
+                </div>
+                <div className={reviewFrameShellClassName}>
+                  <img
+                    className={reviewImageClassName}
+                    src={projectAssetUrl(project.id, activeGapPreviewItem.relativePath)}
+                    alt="Expanded gap preview segment"
+                  />
+                </div>
+                <div className="action-row">
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    onClick={() => setActiveGapPreviewTarget(null)}
+                  >
+                    목록으로
+                  </button>
+                  {activeGapPreviewTarget?.kind === "candidate" ? (
+                    <button
+                      className="primary-button"
+                      type="button"
+                      onClick={() =>
+                        void insertCropIntoGap(activeGap, activeGapPreviewTarget.cropIndex)
+                      }
+                      disabled={isApplyingManualEdit}
+                    >
+                      이 조각 추가
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="row-between">
+                  <div className="stack-xs">
+                    <p className="section-label">추가할 조각 선택</p>
+                    <p className="muted">
+                      {activeGap.previous ? formatSeconds(activeGap.previous.timestampSec) : "시작"} ~{" "}
+                      {activeGap.next ? formatSeconds(activeGap.next.timestampSec) : "끝"} 사이에 캡처된 1초 crop만 보여줍니다.
+                    </p>
+                    <p className="muted">후보 {activeGapCandidateCrops.length}개</p>
+                  </div>
+                  <button className="ghost-button" type="button" onClick={() => setActiveGapKey(null)}>
+                    닫기
+                  </button>
+                </div>
+
+              <div className="review-preview-grid">
+                {activeGap.previous ? (
+                  <button
+                    className="boundary-preview-button"
+                    type="button"
+                    onClick={() => setActiveGapPreviewTarget({ kind: "previous" })}
+                  >
+                    <div className={`${reviewFrameShellClassName} boundary-frame-shell is-start`}>
+                      <p className="review-frame-label">
+                        이전 {formatSeconds(activeGap.previous.timestampSec)}
+                      </p>
+                      <img
+                        className={reviewImageClassName}
+                        src={projectAssetUrl(project.id, activeGap.previous.relativePath)}
+                        alt="Previous score segment"
+                      />
+                    </div>
+                  </button>
+                ) : (
+                  <div className={`${reviewFrameShellClassName} boundary-frame-shell is-start`}>
+                    <p className="review-frame-label">시작</p>
+                    <p className="preview-empty">악보 시작 지점</p>
+                  </div>
+                )}
+                {activeGap.next ? (
+                  <button
+                    className="boundary-preview-button"
+                    type="button"
+                    onClick={() => setActiveGapPreviewTarget({ kind: "next" })}
+                  >
+                    <div className={`${reviewFrameShellClassName} boundary-frame-shell is-end`}>
+                      <p className="review-frame-label">다음 {formatSeconds(activeGap.next.timestampSec)}</p>
+                      <img
+                        className={reviewImageClassName}
+                        src={projectAssetUrl(project.id, activeGap.next.relativePath)}
+                        alt="Next score segment"
+                      />
+                    </div>
+                  </button>
+                ) : (
+                  <div className={`${reviewFrameShellClassName} boundary-frame-shell is-end`}>
+                    <p className="review-frame-label">끝</p>
+                    <p className="preview-empty">악보 마지막 뒤</p>
+                  </div>
+                )}
+              </div>
+
+              {activeGapCandidateCrops.length > 0 ? (
+                <>
+                  <div className="empty-box">
+                    기준 조각이나 후보 조각을 클릭하면 크게 볼 수 있습니다. 후보 조각만 확대 후 `추가`가 가능합니다.
+                  </div>
+
+                  <div className="gap-popup-grid">
+                    {activeGapCandidateCrops.map((crop) => {
+                      const isActivePreview =
+                        activeGapPreviewTarget?.kind === "candidate" &&
+                        activeGapPreviewTarget.cropIndex === crop.cropIndex;
+
+                      return (
+                        <article
+                          className={
+                            isActivePreview
+                              ? "candidate-card stack-xs candidate-card-large is-active"
+                              : "candidate-card stack-xs candidate-card-large"
+                          }
+                          key={crop.cropIndex}
+                        >
+                          <button
+                            className="candidate-preview-button"
+                            type="button"
+                            onClick={() =>
+                              setActiveGapPreviewTarget((currentTarget) =>
+                                currentTarget?.kind === "candidate" &&
+                                currentTarget.cropIndex === crop.cropIndex
+                                  ? null
+                                  : { kind: "candidate", cropIndex: crop.cropIndex }
+                              )
+                            }
+                            aria-label={`${formatSeconds(crop.timestampSec)} 조각 확대 보기`}
+                          >
+                            <div className={reviewFrameShellClassName}>
+                              <p className="review-frame-label">{formatSeconds(crop.timestampSec)}</p>
+                              <img
+                                className={reviewImageClassName}
+                                src={projectAssetUrl(project.id, crop.relativePath)}
+                                alt="Candidate score segment"
+                                loading="lazy"
+                              />
+                            </div>
+                          </button>
+                        </article>
+                      );
+                    })}
+                  </div>
+                </>
+              ) : (
+                <div className="empty-box">
+                  전/후 프레임 사이에 추가 가능한 1초 crop가 없습니다. 다른 위치를 선택하거나 원본 프레임을 확인해 주세요.
+                </div>
+              )}
+              </>
+            )}
           </div>
         </div>
       ) : null}

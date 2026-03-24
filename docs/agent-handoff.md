@@ -31,7 +31,10 @@ The repository was empty at the start of this session. It now contains a web-fir
 - the top-level workbench is now split into `유튜브 변환` and `악보 수정` tabs
 - the `악보 수정` tab leads with a large full-width `전체 Tab` panel so the stitched score can be reviewed in a layout closer to the final sheet before using overlap review or manual editing
 - the large `전체 Tab` panel now has clickable overlays for each stitched segment plus in-score `+` insertion handles, so add/remove edits can start directly from the main score view instead of only from a separate strip
-- the `+` insertion flow now opens as a large popup on top of the score and shows the full 1-second crop catalog, not just a short recommended list
+- the `+` insertion flow now opens as a centered full-screen popup and shows only the 1-second crops captured between the selected previous/next timestamps, which makes manual insertion faster and less noisy
+- the insertion popup now renders larger candidate cards so omitted systems are easier to compare at a glance
+- clicking a candidate card in the insertion popup now switches the full popup into a large preview state on demand, so users only see the expanded crop after they select it
+- the previous/next boundary cards in the insertion popup are also clickable now, using the same enlarged modal preview without exposing an add action
 - each stitched region in edit mode now keeps its timestamp visible in the top-left corner of the score overlay
 - documentation for product scope, architecture, and implementation phases
 
