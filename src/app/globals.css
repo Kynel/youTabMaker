@@ -200,6 +200,33 @@ input {
   gap: 6px;
 }
 
+.workspace-tabs,
+.editor-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.workspace-tab {
+  appearance: none;
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  background: #ffffff;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.workspace-tab.is-active {
+  background: #000000;
+  color: #ffffff;
+}
+
+.workspace-tab:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .toggle-group {
   display: inline-flex;
   flex-wrap: wrap;
@@ -285,6 +312,11 @@ input {
   max-height: min(68vh, 820px);
   overflow: auto;
   padding: 6px;
+}
+
+.score-shell.is-editor-layout {
+  min-height: 420px;
+  max-height: min(76vh, 1200px);
 }
 
 .preview-shell.is-light {
@@ -509,6 +541,135 @@ input {
   background: #ffffff;
 }
 
+.score-editor-canvas {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+
+.score-editor-overlay {
+  position: absolute;
+  inset: 0;
+}
+
+.score-region-button,
+.score-gap-button {
+  position: absolute;
+  margin: 0;
+  padding: 0;
+  appearance: none;
+  border: 1px solid rgba(0, 0, 0, 0.72);
+  background: transparent;
+  cursor: pointer;
+}
+
+.score-region-button {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+
+.score-shell.is-dark .score-region-button {
+  border-color: rgba(255, 255, 255, 0.72);
+}
+
+.score-region-button:hover,
+.score-region-button.is-active {
+  background: rgba(0, 0, 0, 0.1);
+  border-width: 2px;
+}
+
+.score-shell.is-dark .score-region-button:hover,
+.score-shell.is-dark .score-region-button.is-active {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.score-region-label {
+  margin: 6px;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  background: #ffffff;
+  color: #000000;
+  font-size: 11px;
+  font-weight: 700;
+  opacity: 1;
+  pointer-events: none;
+}
+
+.score-shell.is-dark .score-region-label {
+  border-color: #ffffff;
+  background: #000000;
+  color: #ffffff;
+}
+
+.score-gap-button {
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-style: dashed;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.score-shell.is-dark .score-gap-button {
+  border-color: rgba(255, 255, 255, 0.82);
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.score-gap-button:hover,
+.score-gap-button.is-active {
+  border-style: solid;
+  background: #000000;
+  color: #ffffff;
+}
+
+.score-shell.is-dark .score-gap-button:hover,
+.score-shell.is-dark .score-gap-button.is-active {
+  background: #ffffff;
+  color: #000000;
+}
+
+.score-gap-label {
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.score-popup-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  margin: 0;
+  padding: 0;
+  appearance: none;
+  border: 0;
+  background: rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+}
+
+.score-gap-popup {
+  position: absolute;
+  z-index: 5;
+  width: min(920px, calc(100% - 16px));
+  max-height: min(78vh, 920px);
+  padding: 10px;
+  border: 1px solid var(--line);
+  background: #ffffff;
+  overflow-y: auto;
+  overflow-x: hidden;
+  transform: translate(-50%, -50%);
+}
+
+.gap-popup-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 8px;
+}
+
+.candidate-card.is-included {
+  background: #f3f3f3;
+}
+
 .sequence-editor {
   display: flex;
   align-items: stretch;
@@ -575,6 +736,12 @@ input {
     flex-direction: column;
     align-items: stretch;
     grid-template-columns: 1fr;
+  }
+
+  .workspace-tabs,
+  .editor-toolbar,
+  .action-row {
+    align-items: stretch;
   }
 
   .grow {

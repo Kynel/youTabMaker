@@ -28,6 +28,11 @@ The repository was empty at the start of this session. It now contains a web-fir
 - long-running capture and assemble routes now write `project.processing` status updates, and the UI polls them to show a full-screen dimmed progress overlay
 - the ROI workbench now has a fast overlap-review section with side-by-side previous/current crop previews, a one-click recommendation filler, and PNG export locking until review is resolved
 - the ROI workbench now also has a manual edit section that shows gap markers between stitched segments, lets the user open a gap, compare previous/next context, preview nearby candidate crops, and add/remove segments immediately
+- the top-level workbench is now split into `유튜브 변환` and `악보 수정` tabs
+- the `악보 수정` tab leads with a large full-width `전체 Tab` panel so the stitched score can be reviewed in a layout closer to the final sheet before using overlap review or manual editing
+- the large `전체 Tab` panel now has clickable overlays for each stitched segment plus in-score `+` insertion handles, so add/remove edits can start directly from the main score view instead of only from a separate strip
+- the `+` insertion flow now opens as a large popup on top of the score and shows the full 1-second crop catalog, not just a short recommended list
+- each stitched region in edit mode now keeps its timestamp visible in the top-left corner of the score overlay
 - documentation for product scope, architecture, and implementation phases
 
 ## Important Product Assumptions
@@ -78,6 +83,7 @@ The repository was empty at the start of this session. It now contains a web-fir
 - The new review UI exists, but the heuristic that decides which transitions become review items is still conservative and should be tuned with more real-world tab videos.
 - The manual edit UI works even when the omission was not auto-detected, but the current gap hinting is still based on gaps in the stitched crop indices rather than true musical bar semantics.
 - The captured-frame strip and final score preview are intentionally height-limited so the page does not explode on long videos.
+- The selected source frame still lives in the convert workspace, so future UX polish could add a dedicated source-frame inspector inside the edit tab if users need that context without switching tabs.
 - The ROI preview defaults to a dark background, but the user can switch between black and white backgrounds from the preview card.
 - The reset action is a UI/session reset. It does not currently delete stored project files on disk.
 - Download progress from `yt-dlp` is stage-based and best-effort, while frame extraction and score assembly have more granular progress updates.

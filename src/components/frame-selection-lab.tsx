@@ -1,8 +1,9 @@
 "use client";
 
-import { Fragment, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type {
+  AssembledScoreAsset,
   AssemblyCropAsset,
   AssemblyEditorState,
   AssemblyReviewDecision,
@@ -36,10 +37,29 @@ interface ManualEditGap {
   candidateCropIndices: number[];
 }
 
+interface ScoreSegmentRegion {
+  cropIndex: number;
+  timestampSec: number;
+  topPercent: number;
+  heightPercent: number;
+  leftPercent: number;
+  widthPercent: number;
+}
+
+interface ScoreGapRegion {
+  key: string;
+  topPercent: number;
+  heightPercent: number;
+  leftPercent: number;
+  widthPercent: number;
+}
+
 interface FrameSelectionLabProps {
   project: DraftProject | null;
   onProjectUpdated: (project: DraftProject) => void;
   isCapturing: boolean;
+  workspaceMode: "convert" | "edit";
+  onRequestWorkspaceMode: (workspaceMode: "convert" | "edit") => void;
 }
 
 function normalizeRect(selection: RawSelection): RawSelection {
@@ -93,18 +113,6 @@ function formatReviewPercent(ratio: number) {
 
 function buildGapKey(previousCropIndex: number | null, nextCropIndex: number | null) {
   return `${previousCropIndex ?? "start"}:${nextCropIndex ?? "end"}`;
-}
-
-function gapButtonLabel(gap: ManualEditGap) {
-  if (!gap.previous) {
-    return "맨 앞에 추가";
-  }
-
-  if (!gap.next) {
-    return "맨 뒤에 추가";
-  }
-
-  return gap.missingBetweenCount > 0 ? `이 사이에 추가 ${gap.missingBetweenCount}` : "이 사이에 추가";
 }
 
 function buildManualEditGaps(editor: AssemblyEditorState | undefined): ManualEditGap[] {
@@ -164,10 +172,101 @@ function findCropByIndex(crops: AssemblyCropAsset[], cropIndex: number) {
   return crops.find((crop) => crop.cropIndex === cropIndex) ?? null;
 }
 
+function clampNumber(value: number, minimum: number, maximum: number) {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function buildScoreOverlayLayout(
+  editor: AssemblyEditorState | undefined,
+  assembledScore: AssembledScoreAsset | undefined,
+  gaps: ManualEditGap[]
+) {
+  if (!editor || !assembledScore || editor.sequence.length === 0) {
+    return {
+      segments: [] as ScoreSegmentRegion[],
+      gaps: [] as ScoreGapRegion[]
+    };
+  }
+
+  const normalizationWidth = Math.max(...editor.sequence.map((item) => item.width), 1);
+  const contentHeight = editor.sequence.reduce(
+    (sum, item) => sum + Math.max(1, item.height - item.overlapTrimTopPx) + item.gapBefore,
+    0
+  );
+  const verticalPaddingTotal = Math.max(0, assembledScore.height - contentHeight);
+  const topPadding = verticalPaddingTotal / 2;
+  const bottomPadding = verticalPaddingTotal - topPadding;
+  const horizontalPadding = Math.max(0, (assembledScore.width - normalizationWidth) / 2);
+  const leftPercent = (horizontalPadding / Math.max(1, assembledScore.width)) * 100;
+  const widthPercent = (normalizationWidth / Math.max(1, assembledScore.width)) * 100;
+  const minimumGapHitHeight = 18;
+  const segments: ScoreSegmentRegion[] = [];
+  const gapRegions: ScoreGapRegion[] = [];
+
+  if (gaps[0]) {
+    const displayHeight = Math.max(minimumGapHitHeight, topPadding);
+    const displayTop = clampNumber(topPadding / 2 - displayHeight / 2, 0, assembledScore.height - displayHeight);
+
+    gapRegions.push({
+      key: gaps[0].key,
+      topPercent: (displayTop / Math.max(1, assembledScore.height)) * 100,
+      heightPercent: (displayHeight / Math.max(1, assembledScore.height)) * 100,
+      leftPercent,
+      widthPercent
+    });
+  }
+
+  let cursorTop = topPadding;
+
+  editor.sequence.forEach((item, index) => {
+    cursorTop += item.gapBefore;
+
+    const appendedHeight = Math.max(1, item.height - item.overlapTrimTopPx);
+    const itemTop = cursorTop;
+
+    segments.push({
+      cropIndex: item.cropIndex,
+      timestampSec: item.timestampSec,
+      topPercent: (itemTop / Math.max(1, assembledScore.height)) * 100,
+      heightPercent: (appendedHeight / Math.max(1, assembledScore.height)) * 100,
+      leftPercent,
+      widthPercent
+    });
+
+    cursorTop += appendedHeight;
+
+    const gap = gaps[index + 1];
+
+    if (!gap) {
+      return;
+    }
+
+    const nextGapHeight = index === editor.sequence.length - 1 ? bottomPadding : (editor.sequence[index + 1]?.gapBefore ?? 0);
+    const displayHeight = Math.max(minimumGapHitHeight, nextGapHeight);
+    const baseTop = nextGapHeight > 0 ? cursorTop : cursorTop - displayHeight / 2;
+    const displayTop = clampNumber(baseTop, 0, assembledScore.height - displayHeight);
+
+    gapRegions.push({
+      key: gap.key,
+      topPercent: (displayTop / Math.max(1, assembledScore.height)) * 100,
+      heightPercent: (displayHeight / Math.max(1, assembledScore.height)) * 100,
+      leftPercent,
+      widthPercent
+    });
+  });
+
+  return {
+    segments,
+    gaps: gapRegions
+  };
+}
+
 export function FrameSelectionLab({
   project,
   onProjectUpdated,
-  isCapturing
+  isCapturing,
+  workspaceMode,
+  onRequestWorkspaceMode
 }: FrameSelectionLabProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -186,6 +285,7 @@ export function FrameSelectionLab({
   const [isDownloadingScore, setIsDownloadingScore] = useState(false);
   const [reviewDraft, setReviewDraft] = useState<Record<string, AssemblyReviewDecision>>({});
   const [activeGapKey, setActiveGapKey] = useState<string | null>(null);
+  const [activeScoreCropIndex, setActiveScoreCropIndex] = useState<number | null>(null);
 
   const frames = project?.frames ?? [];
   const projectId = project?.id ?? null;
@@ -193,6 +293,19 @@ export function FrameSelectionLab({
   const reviewItems = project?.assemblyReview?.items ?? [];
   const manualEditGaps = buildManualEditGaps(editor);
   const activeGap = manualEditGaps.find((gap) => gap.key === activeGapKey) ?? null;
+  const selectedSequenceItem =
+    activeScoreCropIndex != null ? editor?.sequence.find((item) => item.cropIndex === activeScoreCropIndex) ?? null : null;
+  const scoreOverlayLayout = buildScoreOverlayLayout(editor, project?.assembledScore, manualEditGaps);
+  const orderedCropIndexSet = new Set(editor?.orderedCropIndices ?? []);
+  const activeGapRegion = activeGapKey
+    ? scoreOverlayLayout.gaps.find((gapRegion) => gapRegion.key === activeGapKey) ?? null
+    : null;
+  const activeGapPopupPosition = activeGapRegion
+    ? {
+        left: `${clampNumber(activeGapRegion.leftPercent + activeGapRegion.widthPercent / 2, 18, 82)}%`,
+        top: `${clampNumber(activeGapRegion.topPercent + activeGapRegion.heightPercent / 2, 18, 82)}%`
+      }
+    : null;
   const assembledScoreUrl =
     project?.assembledScore && project
       ? `${projectAssetUrl(project.id, project.assembledScore.relativePath)}?v=${encodeURIComponent(
@@ -326,6 +439,16 @@ export function FrameSelectionLab({
       setActiveGapKey(null);
     }
   }, [activeGapKey, manualEditGaps]);
+
+  useEffect(() => {
+    if (activeScoreCropIndex == null) {
+      return;
+    }
+
+    if (!editor?.sequence.some((item) => item.cropIndex === activeScoreCropIndex)) {
+      setActiveScoreCropIndex(null);
+    }
+  }, [activeScoreCropIndex, editor?.generatedAt, editor?.sequence]);
 
   useEffect(() => {
     if (!isScoreViewerOpen) {
@@ -638,6 +761,7 @@ export function FrameSelectionLab({
   const isExportLocked =
     (requiresReviewConfirmation && (unresolvedReviewCount > 0 || hasUnsavedReviewChanges)) ||
     isApplyingManualEdit;
+  const isConvertMode = workspaceMode === "convert";
 
   async function generateFullScore() {
     if (!project || !roi) {
@@ -669,6 +793,7 @@ export function FrameSelectionLab({
       }
 
       onProjectUpdated(payload.project);
+      onRequestWorkspaceMode("edit");
       setStatusMessage(
         payload.project.assemblyReview?.totalCount
           ? `의심 구간 ${payload.project.assemblyReview.totalCount}개를 추렸습니다. 검수 후 PNG를 내보낼 수 있습니다.`
@@ -791,6 +916,8 @@ export function FrameSelectionLab({
       nextGapKey,
       crop ? `${formatSeconds(crop.timestampSec)} 조각을 악보에 추가했습니다.` : "선택한 조각을 악보에 추가했습니다."
     );
+    setActiveGapKey(null);
+    setActiveScoreCropIndex(cropIndex);
   }
 
   async function removeCropFromSequence(cropIndex: number) {
@@ -808,6 +935,7 @@ export function FrameSelectionLab({
     const nextForcedCropIndices = editor.forcedCropIndices.filter((currentCropIndex) => currentCropIndex !== cropIndex);
     const previousCropIndex = cropPosition > 0 ? editor.orderedCropIndices[cropPosition - 1] ?? null : null;
     const nextCropIndex = editor.orderedCropIndices[cropPosition + 1] ?? null;
+    setActiveScoreCropIndex(null);
 
     await applyManualEdit(
       nextOrderedCropIndices,
@@ -923,15 +1051,43 @@ export function FrameSelectionLab({
     );
   }
 
+  function activateGapEdit(gapKey: string) {
+    setActiveScoreCropIndex(null);
+    setActiveGapKey(gapKey);
+  }
+
+  function activateScoreCrop(cropIndex: number) {
+    setActiveGapKey(null);
+    setActiveScoreCropIndex(cropIndex);
+  }
+
+  function openFrameInConvertWorkspace(frameId: string | null) {
+    if (!frameId) {
+      return;
+    }
+
+    setSelectedFrameId(frameId);
+    onRequestWorkspaceMode("convert");
+  }
+
   const assembledImageClassName =
     scoreColorMode === "inverted" ? "assembled-image is-inverted" : "assembled-image";
   const viewerImageClassName = scoreColorMode === "inverted" ? "viewer-image is-inverted" : "viewer-image";
   const reviewImageClassName = scoreColorMode === "inverted" ? "review-image is-inverted" : "review-image";
+  const previewShellClassName = previewBackground === "dark" ? "preview-shell is-dark" : "preview-shell is-light";
+  const scoreShellClassName = previewBackground === "dark" ? "score-shell is-dark" : "score-shell is-light";
+  const editorScoreShellClassName = `${scoreShellClassName} is-editor-layout`;
+  const reviewFrameShellClassName =
+    previewBackground === "dark" ? "review-frame-shell is-dark" : "review-frame-shell is-light";
 
   if (!project) {
     return (
       <section className="minimal-card">
-        <div className="empty-box">URL을 넣고 영상을 불러오면 여기서 ROI를 선택할 수 있습니다.</div>
+        <div className="empty-box">
+          {isConvertMode
+            ? "URL을 넣고 영상을 불러오면 여기서 ROI를 선택할 수 있습니다."
+            : "유튜브 변환 탭에서 먼저 영상을 불러오고 전체 Tab를 생성하세요."}
+        </div>
       </section>
     );
   }
@@ -943,484 +1099,597 @@ export function FrameSelectionLab({
     : frames.length > 0
       ? `${frames.length} frames`
       : isCapturing
-        ? "capturing"
+      ? "capturing"
         : "ready";
+
+  const reviewSection = project.assembledScore ? (
+    <div className="section-block stack-xs">
+      <div className="row-between">
+        <div className="stack-xs">
+          <p className="section-label">Overlap Review</p>
+          <p className="muted">
+            {reviewItems.length === 0
+              ? "검수 필요 구간 없음"
+              : `${reviewItems.length}개 중 ${resolvedReviewCount}개 선택 완료 / 보류 ${unresolvedReviewCount}개`}
+          </p>
+        </div>
+        {reviewItems.length > 0 ? (
+          <div className="action-row">
+            <button className="ghost-button" type="button" onClick={applyRecommendedReviewChoices}>
+              추천값 채우기
+            </button>
+            <button
+              className="ghost-button"
+              type="button"
+              onClick={restoreSavedReviewChoices}
+              disabled={!hasUnsavedReviewChanges}
+            >
+              되돌리기
+            </button>
+            <button
+              className="primary-button"
+              type="button"
+              onClick={() => void applyReview()}
+              disabled={
+                unresolvedReviewCount > 0 ||
+                !hasUnsavedReviewChanges ||
+                isApplyingReview ||
+                isApplyingManualEdit
+              }
+            >
+              {isApplyingReview ? "반영 중" : "검수 반영"}
+            </button>
+          </div>
+        ) : null}
+      </div>
+
+      {reviewItems.length === 0 ? (
+        <div className="empty-box">자동 제거만으로 충분해서 추가 검수 없이 PNG를 내보낼 수 있습니다.</div>
+      ) : (
+        <div className="review-list">
+          {reviewItems.map((item, index) => {
+            const decision = reviewDraft[item.id];
+            const previousCropUrl = projectAssetUrl(project.id, item.previousCropRelativePath);
+            const currentCropUrl = projectAssetUrl(project.id, item.currentCropRelativePath);
+
+            return (
+              <article className="review-card stack-xs" key={item.id}>
+                <div className="row-between">
+                  <p className="section-label">검수 {index + 1}</p>
+                  <p className="muted">
+                    {formatSeconds(item.previousTimestampSec)}
+                    {" -> "}
+                    {formatSeconds(item.currentTimestampSec)}
+                  </p>
+                </div>
+                <p className="review-detail">{item.reason}</p>
+                <div className="review-meta-row">
+                  <span>절삭 후보 {formatReviewPercent(item.overlapTrimRatio)}</span>
+                  <span>유사도 {item.overlapScore.toFixed(3)}</span>
+                </div>
+                <div className="review-preview-grid">
+                  <div className={reviewFrameShellClassName}>
+                    <p className="review-frame-label">이전</p>
+                    <img className={reviewImageClassName} src={previousCropUrl} alt="Previous tab segment" />
+                  </div>
+                  <div className={reviewFrameShellClassName}>
+                    <p className="review-frame-label">현재</p>
+                    <img className={reviewImageClassName} src={currentCropUrl} alt="Current tab segment" />
+                  </div>
+                </div>
+                <div className="action-row">
+                  <button
+                    className={decision === "keep_both" ? "toggle-button is-active" : "toggle-button"}
+                    type="button"
+                    onClick={() => updateReviewDecision(item.id, "keep_both")}
+                  >
+                    둘 다 유지
+                  </button>
+                  <button
+                    className={decision === "trim_overlap" ? "toggle-button is-active" : "toggle-button"}
+                    type="button"
+                    onClick={() => updateReviewDecision(item.id, "trim_overlap")}
+                  >
+                    겹침 제거
+                  </button>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  ) : null;
+
+  const manualEditSection = project.assembledScore && editor ? (
+    <div className="section-block stack-xs">
+      <div className="row-between">
+        <div className="stack-xs">
+          <p className="section-label">Manual Edit</p>
+          <p className="muted">
+            중앙의 전체 악보에서 조각을 클릭하면 제거, 조각 사이의 `+`를 클릭하면 추가 후보를 엽니다.
+          </p>
+        </div>
+        {selectedSequenceItem || activeGap ? (
+          <button
+            className="ghost-button"
+            type="button"
+            onClick={() => {
+              setActiveScoreCropIndex(null);
+              setActiveGapKey(null);
+            }}
+          >
+            선택 해제
+          </button>
+        ) : null}
+      </div>
+
+      {selectedSequenceItem ? (
+        <div className="manual-editor-panel stack-xs">
+          <div className="row-between">
+            <div className="stack-xs">
+              <p className="section-label">선택한 조각</p>
+              <p className="muted">
+                {formatSeconds(selectedSequenceItem.timestampSec)}
+                {selectedSequenceItem.trimMode === "manual" ? " / 수동 추가 조각" : " / 현재 악보 조각"}
+              </p>
+            </div>
+          </div>
+
+          <div className="review-preview-grid">
+            <div className={reviewFrameShellClassName}>
+              <p className="review-frame-label">{formatSeconds(selectedSequenceItem.timestampSec)}</p>
+              <img
+                className={reviewImageClassName}
+                src={projectAssetUrl(project.id, selectedSequenceItem.relativePath)}
+                alt="Selected score segment"
+              />
+            </div>
+          </div>
+
+          <div className="action-row">
+            <button
+              className="ghost-button"
+              type="button"
+              onClick={() => openFrameInConvertWorkspace(selectedSequenceItem.frameId)}
+            >
+              프레임 보기
+            </button>
+            <button
+              className="primary-button"
+              type="button"
+              onClick={() => void removeCropFromSequence(selectedSequenceItem.cropIndex)}
+              disabled={isApplyingManualEdit || editor.orderedCropIndices.length <= 1}
+            >
+              제거
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="empty-box">
+          현재 조각 {editor.sequence.length}개 / 수동 추가 {manualInsertedCount}개. 큰 악보에서 조각을 누르면 제거,
+          `+`를 누르면 추가 팝업이 바로 열립니다.
+        </div>
+      )}
+    </div>
+  ) : null;
 
   return (
     <section className="minimal-card stack-sm">
-      <div className="row-between">
-        <h2 className="section-title">작업</h2>
-        <p className="status-line">{summaryText}</p>
-      </div>
-
-      <div className="section-block stack-xs">
-        <div className="row-between">
-          <p className="section-label">Captured Frames</p>
-          <p className="muted">
-            {isCapturing ? "추출 중" : selectedFrame ? formatSeconds(selectedFrame.timestampSec) : ""}
-          </p>
-        </div>
-
-        <div className="thumbnail-strip">
-          {frames.length === 0 ? (
-            <p className="preview-empty">프레임 없음</p>
-          ) : (
-            frames.map((frame) => (
-              <FrameThumbnail
-                key={frame.id}
-                frame={frame}
-                isSelected={frame.id === selectedFrameId}
-                imageUrl={projectAssetUrl(project.id, frame.relativePath)}
-                onSelect={() => setSelectedFrameId(frame.id)}
-              />
-            ))
-          )}
-        </div>
-      </div>
-
-      <div className="section-block stack-xs">
-        <div className="action-row">
-          <button className="ghost-button" type="button" onClick={suggestBottomBand} disabled={!imageElement}>
-            자동 선택
-          </button>
-          <button className="ghost-button" type="button" onClick={clearSelection} disabled={!selection}>
-            ROI 지우기
-          </button>
-          <button
-            className="primary-button"
-            type="button"
-            onClick={() => void generateFullScore()}
-            disabled={!roi || isAssembling || isApplyingReview || isApplyingManualEdit}
-          >
-            {isAssembling ? "생성 중" : "전체 Tab 생성"}
-          </button>
-        </div>
-
-        <div className="canvas-shell">
-          <canvas
-            ref={canvasRef}
-            className="workbench-canvas"
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerUp}
-          />
-        </div>
-      </div>
-
-      {statusMessage ? <div className="status-box">{statusMessage}</div> : null}
-
-      <div className="editor-grid">
-        <div className="section-block stack-xs">
+      {isConvertMode ? (
+        <>
           <div className="row-between">
-            <p className="section-label">ROI Preview</p>
-            <div className="toggle-group" role="group" aria-label="ROI preview background">
-              <button
-                className={previewBackground === "dark" ? "toggle-button is-active" : "toggle-button"}
-                type="button"
-                onClick={() => setPreviewBackground("dark")}
-              >
-                검정 배경
-              </button>
-              <button
-                className={previewBackground === "light" ? "toggle-button is-active" : "toggle-button"}
-                type="button"
-                onClick={() => setPreviewBackground("light")}
-              >
-                흰 배경
-              </button>
+            <h2 className="section-title">유튜브 변환</h2>
+            <p className="status-line">{summaryText}</p>
+          </div>
+
+          <div className="section-block stack-xs">
+            <div className="row-between">
+              <p className="section-label">Captured Frames</p>
+              <p className="muted">
+                {isCapturing ? "추출 중" : selectedFrame ? formatSeconds(selectedFrame.timestampSec) : ""}
+              </p>
+            </div>
+
+            <div className="thumbnail-strip">
+              {frames.length === 0 ? (
+                <p className="preview-empty">프레임 없음</p>
+              ) : (
+                frames.map((frame) => (
+                  <FrameThumbnail
+                    key={frame.id}
+                    frame={frame}
+                    isSelected={frame.id === selectedFrameId}
+                    imageUrl={projectAssetUrl(project.id, frame.relativePath)}
+                    onSelect={() => setSelectedFrameId(frame.id)}
+                  />
+                ))
+              )}
             </div>
           </div>
-          <div className={previewBackground === "dark" ? "preview-shell is-dark" : "preview-shell is-light"}>
-            {roi ? null : <p className="preview-empty">ROI 없음</p>}
-            <canvas ref={previewCanvasRef} className={roi ? "preview-canvas" : "preview-canvas is-hidden"} />
-          </div>
-        </div>
 
-        <div className="section-block stack-xs">
-          <div className="row-between">
-            <p className="section-label">Final Tab</p>
+          <div className="section-block stack-xs">
             <div className="action-row">
-              <div className="toggle-group" role="group" aria-label="Final tab color mode">
-                <button
-                  className={scoreColorMode === "original" ? "toggle-button is-active" : "toggle-button"}
-                  type="button"
-                  onClick={() => setScoreColorMode("original")}
-                >
-                  원본
-                </button>
-                <button
-                  className={scoreColorMode === "inverted" ? "toggle-button is-active" : "toggle-button"}
-                  type="button"
-                  onClick={() => setScoreColorMode("inverted")}
-                >
-                  반전
-                </button>
-              </div>
-              {project.assembledScore ? (
-                <p className="muted">
-                  {project.assembledScore.sourceFrameCount}
-                  {" -> "}
-                  {project.assembledScore.stitchedFrameCount}
-                </p>
-              ) : null}
+              <button className="ghost-button" type="button" onClick={suggestBottomBand} disabled={!imageElement}>
+                자동 선택
+              </button>
+              <button className="ghost-button" type="button" onClick={clearSelection} disabled={!selection}>
+                ROI 지우기
+              </button>
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => void generateFullScore()}
+                disabled={!roi || isAssembling || isApplyingReview || isApplyingManualEdit}
+              >
+                {isAssembling ? "생성 중" : "전체 Tab 생성"}
+              </button>
+            </div>
+
+            <div className="canvas-shell">
+              <canvas
+                ref={canvasRef}
+                className="workbench-canvas"
+                onPointerDown={handlePointerDown}
+                onPointerMove={handlePointerMove}
+                onPointerUp={handlePointerUp}
+              />
             </div>
           </div>
+
+          {statusMessage ? <div className="status-box">{statusMessage}</div> : null}
+
+          <div className="editor-grid">
+            <div className="section-block stack-xs">
+              <div className="row-between">
+                <p className="section-label">ROI Preview</p>
+                <div className="toggle-group" role="group" aria-label="ROI preview background">
+                  <button
+                    className={previewBackground === "dark" ? "toggle-button is-active" : "toggle-button"}
+                    type="button"
+                    onClick={() => setPreviewBackground("dark")}
+                  >
+                    검정 배경
+                  </button>
+                  <button
+                    className={previewBackground === "light" ? "toggle-button is-active" : "toggle-button"}
+                    type="button"
+                    onClick={() => setPreviewBackground("light")}
+                  >
+                    흰 배경
+                  </button>
+                </div>
+              </div>
+              <div className={previewShellClassName}>
+                {roi ? null : <p className="preview-empty">ROI 없음</p>}
+                <canvas ref={previewCanvasRef} className={roi ? "preview-canvas" : "preview-canvas is-hidden"} />
+              </div>
+            </div>
+
+            <div className="section-block stack-xs">
+              <div className="row-between">
+                <p className="section-label">Final Tab</p>
+                <div className="action-row">
+                  <div className="toggle-group" role="group" aria-label="Final tab color mode">
+                    <button
+                      className={scoreColorMode === "original" ? "toggle-button is-active" : "toggle-button"}
+                      type="button"
+                      onClick={() => setScoreColorMode("original")}
+                    >
+                      원본
+                    </button>
+                    <button
+                      className={scoreColorMode === "inverted" ? "toggle-button is-active" : "toggle-button"}
+                      type="button"
+                      onClick={() => setScoreColorMode("inverted")}
+                    >
+                      반전
+                    </button>
+                  </div>
+                  {project.assembledScore ? (
+                    <p className="muted">
+                      {project.assembledScore.sourceFrameCount}
+                      {" -> "}
+                      {project.assembledScore.stitchedFrameCount}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+              {project.assembledScore && assembledScoreUrl ? (
+                <>
+                  <div className={scoreShellClassName}>
+                    <img className={assembledImageClassName} src={assembledScoreUrl} alt="Assembled guitar tab score" />
+                  </div>
+                  <div className="action-row">
+                    <button
+                      className="ghost-button"
+                      type="button"
+                      onClick={() => onRequestWorkspaceMode("edit")}
+                    >
+                      악보 수정 탭
+                    </button>
+                    <button className="ghost-button" type="button" onClick={() => setIsScoreViewerOpen(true)}>
+                      크게 보기
+                    </button>
+                    <button
+                      className="primary-button"
+                      type="button"
+                      onClick={() => void downloadScoreImage()}
+                      disabled={isDownloadingScore || isExportLocked}
+                    >
+                      {isDownloadingScore ? "PNG 생성 중" : "PNG"}
+                    </button>
+                  </div>
+                  {isExportLocked ? (
+                    <p className="muted">의심 구간 검수를 반영한 뒤 PNG를 내보낼 수 있습니다.</p>
+                  ) : null}
+                </>
+              ) : (
+                <div className={scoreShellClassName}>
+                  <p className="preview-empty">결과 없음</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="row-between">
+            <div className="stack-xs">
+              <h2 className="section-title">악보 수정</h2>
+              <p className="muted">
+                전체 악보 레이아웃을 크게 보면서 검수와 수동 추가/삭제를 빠르게 진행합니다.
+              </p>
+            </div>
+            <div className="action-row">
+              <button className="ghost-button" type="button" onClick={() => onRequestWorkspaceMode("convert")}>
+                유튜브 변환 탭
+              </button>
+              <p className="status-line">{summaryText}</p>
+            </div>
+          </div>
+
           {project.assembledScore && assembledScoreUrl ? (
-            <>
-              <div className={previewBackground === "dark" ? "score-shell is-dark" : "score-shell is-light"}>
-                <img className={assembledImageClassName} src={assembledScoreUrl} alt="Assembled guitar tab score" />
+            <div className="section-block stack-xs">
+              <div className="row-between">
+                <div className="stack-xs">
+                  <p className="section-label">전체 Tab</p>
+                  <p className="muted">
+                    {project.assembledScore.sourceFrameCount}
+                    {" -> "}
+                    {project.assembledScore.stitchedFrameCount}
+                    {manualInsertedCount > 0 ? ` / 수동 추가 ${manualInsertedCount}` : ""}
+                  </p>
+                </div>
+                <div className="editor-toolbar">
+                  <div className="toggle-group" role="group" aria-label="Score background">
+                    <button
+                      className={previewBackground === "dark" ? "toggle-button is-active" : "toggle-button"}
+                      type="button"
+                      onClick={() => setPreviewBackground("dark")}
+                    >
+                      검정 배경
+                    </button>
+                    <button
+                      className={previewBackground === "light" ? "toggle-button is-active" : "toggle-button"}
+                      type="button"
+                      onClick={() => setPreviewBackground("light")}
+                    >
+                      흰 배경
+                    </button>
+                  </div>
+                  <div className="toggle-group" role="group" aria-label="Final tab color mode">
+                    <button
+                      className={scoreColorMode === "original" ? "toggle-button is-active" : "toggle-button"}
+                      type="button"
+                      onClick={() => setScoreColorMode("original")}
+                    >
+                      원본
+                    </button>
+                    <button
+                      className={scoreColorMode === "inverted" ? "toggle-button is-active" : "toggle-button"}
+                      type="button"
+                      onClick={() => setScoreColorMode("inverted")}
+                    >
+                      반전
+                    </button>
+                  </div>
+                  <button className="ghost-button" type="button" onClick={() => setIsScoreViewerOpen(true)}>
+                    크게 보기
+                  </button>
+                  <button
+                    className="primary-button"
+                    type="button"
+                    onClick={() => void downloadScoreImage()}
+                    disabled={isDownloadingScore || isExportLocked}
+                  >
+                    {isDownloadingScore ? "PNG 생성 중" : "PNG"}
+                  </button>
+                </div>
               </div>
-              <div className="action-row">
-                <button className="ghost-button" type="button" onClick={() => setIsScoreViewerOpen(true)}>
-                  크게 보기
-                </button>
-                <button
-                  className="primary-button"
-                  type="button"
-                  onClick={() => void downloadScoreImage()}
-                  disabled={isDownloadingScore || isExportLocked}
-                >
-                  {isDownloadingScore ? "PNG 생성 중" : "PNG"}
-                </button>
+
+              <div className={editorScoreShellClassName}>
+                <div className="score-editor-canvas">
+                  <img className={assembledImageClassName} src={assembledScoreUrl} alt="Assembled guitar tab score" />
+                  <div className="score-editor-overlay">
+                    {scoreOverlayLayout.segments.map((region) => (
+                      <button
+                        key={`segment-${region.cropIndex}`}
+                        className={
+                          activeScoreCropIndex === region.cropIndex
+                            ? "score-region-button is-active"
+                            : "score-region-button"
+                        }
+                        type="button"
+                        style={{
+                          top: `${region.topPercent}%`,
+                          height: `${region.heightPercent}%`,
+                          left: `${region.leftPercent}%`,
+                          width: `${region.widthPercent}%`
+                        }}
+                        onClick={() => activateScoreCrop(region.cropIndex)}
+                        aria-label={`${formatSeconds(region.timestampSec)} 조각 선택`}
+                      >
+                        <span className="score-region-label">{formatSeconds(region.timestampSec)}</span>
+                      </button>
+                    ))}
+                    {scoreOverlayLayout.gaps.map((gapRegion) => (
+                      <button
+                        key={`gap-${gapRegion.key}`}
+                        className={activeGapKey === gapRegion.key ? "score-gap-button is-active" : "score-gap-button"}
+                        type="button"
+                        style={{
+                          top: `${gapRegion.topPercent}%`,
+                          height: `${gapRegion.heightPercent}%`,
+                          left: `${gapRegion.leftPercent}%`,
+                          width: `${gapRegion.widthPercent}%`
+                        }}
+                        onClick={() => activateGapEdit(gapRegion.key)}
+                        aria-label="여기에 조각 추가"
+                      >
+                        <span className="score-gap-label">+</span>
+                      </button>
+                    ))}
+                  </div>
+                  {activeGap && activeGapPopupPosition ? (
+                    <>
+                      <button
+                        className="score-popup-backdrop"
+                        type="button"
+                        aria-label="추가 팝업 닫기"
+                        onClick={() => setActiveGapKey(null)}
+                      />
+                      <div
+                        className="score-gap-popup"
+                        style={activeGapPopupPosition}
+                        role="dialog"
+                        aria-modal="false"
+                        aria-label="추가할 조각 선택"
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        <div className="row-between">
+                          <div className="stack-xs">
+                            <p className="section-label">추가할 조각 선택</p>
+                            <p className="muted">1초 간격으로 잘라둔 전체 crop를 시간순으로 모두 보여줍니다.</p>
+                          </div>
+                          <button className="ghost-button" type="button" onClick={() => setActiveGapKey(null)}>
+                            닫기
+                          </button>
+                        </div>
+
+                        <div className="review-preview-grid">
+                          <div className={reviewFrameShellClassName}>
+                            <p className="review-frame-label">
+                              {activeGap.previous ? `이전 ${formatSeconds(activeGap.previous.timestampSec)}` : "시작"}
+                            </p>
+                            {activeGap.previous ? (
+                              <>
+                                <img
+                                  className={reviewImageClassName}
+                                  src={projectAssetUrl(project.id, activeGap.previous.relativePath)}
+                                  alt="Previous score segment"
+                                />
+                                <div className="action-row">
+                                  <button
+                                    className="ghost-button"
+                                    type="button"
+                                    onClick={() => openFrameInConvertWorkspace(activeGap.previous?.frameId ?? null)}
+                                  >
+                                    프레임
+                                  </button>
+                                </div>
+                              </>
+                            ) : (
+                              <p className="preview-empty">악보 시작 지점</p>
+                            )}
+                          </div>
+                          <div className={reviewFrameShellClassName}>
+                            <p className="review-frame-label">
+                              {activeGap.next ? `다음 ${formatSeconds(activeGap.next.timestampSec)}` : "끝"}
+                            </p>
+                            {activeGap.next ? (
+                              <>
+                                <img
+                                  className={reviewImageClassName}
+                                  src={projectAssetUrl(project.id, activeGap.next.relativePath)}
+                                  alt="Next score segment"
+                                />
+                                <div className="action-row">
+                                  <button
+                                    className="ghost-button"
+                                    type="button"
+                                    onClick={() => openFrameInConvertWorkspace(activeGap.next?.frameId ?? null)}
+                                  >
+                                    프레임
+                                  </button>
+                                </div>
+                              </>
+                            ) : (
+                              <p className="preview-empty">악보 마지막 뒤</p>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="gap-popup-grid">
+                          {(editor?.crops ?? []).map((crop) => {
+                            const isAlreadyIncluded = orderedCropIndexSet.has(crop.cropIndex);
+
+                            return (
+                              <article
+                                className={isAlreadyIncluded ? "candidate-card stack-xs is-included" : "candidate-card stack-xs"}
+                                key={crop.cropIndex}
+                              >
+                                <div className={reviewFrameShellClassName}>
+                                  <p className="review-frame-label">{formatSeconds(crop.timestampSec)}</p>
+                                  <img
+                                    className={reviewImageClassName}
+                                    src={projectAssetUrl(project.id, crop.relativePath)}
+                                    alt="Candidate score segment"
+                                    loading="lazy"
+                                  />
+                                </div>
+                                <div className="action-row">
+                                  <button
+                                    className="ghost-button"
+                                    type="button"
+                                    onClick={() => openFrameInConvertWorkspace(crop.frameId)}
+                                  >
+                                    프레임
+                                  </button>
+                                  <button
+                                    className="primary-button"
+                                    type="button"
+                                    onClick={() => void insertCropIntoGap(activeGap, crop.cropIndex)}
+                                    disabled={isApplyingManualEdit || isAlreadyIncluded}
+                                  >
+                                    {isAlreadyIncluded ? "포함됨" : "추가"}
+                                  </button>
+                                </div>
+                              </article>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </>
+                  ) : null}
+                </div>
               </div>
+
+              <p className="muted">조각 클릭: 제거 후보 선택 / `+` 클릭: 이 위치에 추가할 후보 열기</p>
+
               {isExportLocked ? (
                 <p className="muted">의심 구간 검수를 반영한 뒤 PNG를 내보낼 수 있습니다.</p>
               ) : null}
-            </>
+            </div>
           ) : (
-            <div className={previewBackground === "dark" ? "score-shell is-dark" : "score-shell is-light"}>
-              <p className="preview-empty">결과 없음</p>
-            </div>
+            <div className="empty-box">유튜브 변환 탭에서 먼저 전체 Tab를 생성하세요.</div>
           )}
-        </div>
-      </div>
 
-      {project.assembledScore ? (
-        <div className="section-block stack-xs">
-          <div className="row-between">
-            <div className="stack-xs">
-              <p className="section-label">Overlap Review</p>
-              <p className="muted">
-                {reviewItems.length === 0
-                  ? "검수 필요 구간 없음"
-                  : `${reviewItems.length}개 중 ${resolvedReviewCount}개 선택 완료 / 보류 ${unresolvedReviewCount}개`}
-              </p>
-            </div>
-            {reviewItems.length > 0 ? (
-              <div className="action-row">
-                <button className="ghost-button" type="button" onClick={applyRecommendedReviewChoices}>
-                  추천값 채우기
-                </button>
-                <button
-                  className="ghost-button"
-                  type="button"
-                  onClick={restoreSavedReviewChoices}
-                  disabled={!hasUnsavedReviewChanges}
-                >
-                  되돌리기
-                </button>
-                <button
-                  className="primary-button"
-                  type="button"
-                  onClick={() => void applyReview()}
-                  disabled={
-                    unresolvedReviewCount > 0 ||
-                    !hasUnsavedReviewChanges ||
-                    isApplyingReview ||
-                    isApplyingManualEdit
-                  }
-                >
-                  {isApplyingReview ? "반영 중" : "검수 반영"}
-                </button>
-              </div>
-            ) : null}
-          </div>
-
-          {reviewItems.length === 0 ? (
-            <div className="empty-box">자동 제거만으로 충분해서 추가 검수 없이 PNG를 내보낼 수 있습니다.</div>
-          ) : (
-            <div className="review-list">
-              {reviewItems.map((item, index) => {
-                const decision = reviewDraft[item.id];
-                const previousCropUrl = projectAssetUrl(project.id, item.previousCropRelativePath);
-                const currentCropUrl = projectAssetUrl(project.id, item.currentCropRelativePath);
-
-                return (
-                  <article className="review-card stack-xs" key={item.id}>
-                    <div className="row-between">
-                      <p className="section-label">검수 {index + 1}</p>
-                      <p className="muted">
-                        {formatSeconds(item.previousTimestampSec)}
-                        {" -> "}
-                        {formatSeconds(item.currentTimestampSec)}
-                      </p>
-                    </div>
-                    <p className="review-detail">{item.reason}</p>
-                    <div className="review-meta-row">
-                      <span>절삭 후보 {formatReviewPercent(item.overlapTrimRatio)}</span>
-                      <span>유사도 {item.overlapScore.toFixed(3)}</span>
-                    </div>
-                    <div className="review-preview-grid">
-                      <div
-                        className={
-                          previewBackground === "dark"
-                            ? "review-frame-shell is-dark"
-                            : "review-frame-shell is-light"
-                        }
-                      >
-                        <p className="review-frame-label">이전</p>
-                        <img className={reviewImageClassName} src={previousCropUrl} alt="Previous tab segment" />
-                      </div>
-                      <div
-                        className={
-                          previewBackground === "dark"
-                            ? "review-frame-shell is-dark"
-                            : "review-frame-shell is-light"
-                        }
-                      >
-                        <p className="review-frame-label">현재</p>
-                        <img className={reviewImageClassName} src={currentCropUrl} alt="Current tab segment" />
-                      </div>
-                    </div>
-                    <div className="action-row">
-                      <button
-                        className={decision === "keep_both" ? "toggle-button is-active" : "toggle-button"}
-                        type="button"
-                        onClick={() => updateReviewDecision(item.id, "keep_both")}
-                      >
-                        둘 다 유지
-                      </button>
-                      <button
-                        className={decision === "trim_overlap" ? "toggle-button is-active" : "toggle-button"}
-                        type="button"
-                        onClick={() => updateReviewDecision(item.id, "trim_overlap")}
-                      >
-                        겹침 제거
-                      </button>
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      ) : null}
-
-      {project.assembledScore && editor ? (
-        <div className="section-block stack-xs">
-          <div className="row-between">
-            <div className="stack-xs">
-              <p className="section-label">Manual Edit</p>
-              <p className="muted">
-                현재 조각 {editor.sequence.length}개 / 수동 추가 {manualInsertedCount}개
-              </p>
-            </div>
-            {activeGap ? (
-              <button className="ghost-button" type="button" onClick={() => setActiveGapKey(null)}>
-                편집 닫기
-              </button>
-            ) : null}
-          </div>
-
-          <div className="sequence-editor">
-            {manualEditGaps[0] ? (
-              <div className="sequence-gap-shell">
-                <button
-                  className={activeGapKey === manualEditGaps[0].key ? "gap-button is-active" : "gap-button"}
-                  type="button"
-                  onClick={() => setActiveGapKey(manualEditGaps[0]?.key ?? null)}
-                >
-                  {gapButtonLabel(manualEditGaps[0])}
-                </button>
-              </div>
-            ) : null}
-
-            {editor.sequence.map((sequenceItem, index) => {
-              const gap = manualEditGaps[index + 1] ?? null;
-
-              return (
-                <Fragment key={sequenceItem.cropIndex}>
-                  <article className="sequence-card stack-xs">
-                    <div
-                      className={
-                        previewBackground === "dark"
-                          ? "review-frame-shell is-dark"
-                          : "review-frame-shell is-light"
-                      }
-                    >
-                      <p className="review-frame-label">{formatSeconds(sequenceItem.timestampSec)}</p>
-                      <img
-                        className={reviewImageClassName}
-                        src={projectAssetUrl(project.id, sequenceItem.relativePath)}
-                        alt="Current sequence tab segment"
-                      />
-                    </div>
-                    <div className="action-row">
-                      <button
-                        className="ghost-button"
-                        type="button"
-                        onClick={() => setSelectedFrameId(sequenceItem.frameId)}
-                      >
-                        프레임
-                      </button>
-                      <button
-                        className="ghost-button"
-                        type="button"
-                        onClick={() => void removeCropFromSequence(sequenceItem.cropIndex)}
-                        disabled={isApplyingManualEdit || editor.orderedCropIndices.length <= 1}
-                      >
-                        제거
-                      </button>
-                    </div>
-                  </article>
-
-                  {gap ? (
-                    <div className="sequence-gap-shell">
-                      <button
-                        className={activeGapKey === gap.key ? "gap-button is-active" : "gap-button"}
-                        type="button"
-                        onClick={() => setActiveGapKey(gap.key)}
-                      >
-                        {gapButtonLabel(gap)}
-                      </button>
-                    </div>
-                  ) : null}
-                </Fragment>
-              );
-            })}
-          </div>
-
-          {activeGap ? (
-            <div className="manual-editor-panel stack-xs">
-              <div className="row-between">
-                <div className="stack-xs">
-                  <p className="section-label">누락 구간 편집</p>
-                  <p className="muted">
-                    {activeGap.missingBetweenCount > 0
-                      ? `현재 구간 사이에서 ${activeGap.missingBetweenCount}개의 누락 후보를 찾았습니다.`
-                      : "근처 조각 후보를 불러왔습니다."}
-                  </p>
-                </div>
-              </div>
-
-              <div className="review-preview-grid">
-                <div
-                  className={
-                    previewBackground === "dark"
-                      ? "review-frame-shell is-dark"
-                      : "review-frame-shell is-light"
-                  }
-                >
-                  <p className="review-frame-label">
-                    {activeGap.previous ? `이전 ${formatSeconds(activeGap.previous.timestampSec)}` : "시작"}
-                  </p>
-                  {activeGap.previous ? (
-                    <>
-                      <img
-                        className={reviewImageClassName}
-                        src={projectAssetUrl(project.id, activeGap.previous.relativePath)}
-                        alt="Previous score segment"
-                      />
-                      <div className="action-row">
-                        <button
-                          className="ghost-button"
-                          type="button"
-                          onClick={() => setSelectedFrameId(activeGap.previous?.frameId ?? null)}
-                        >
-                          프레임
-                        </button>
-                      </div>
-                    </>
-                  ) : (
-                    <p className="preview-empty">악보 시작 지점</p>
-                  )}
-                </div>
-                <div
-                  className={
-                    previewBackground === "dark"
-                      ? "review-frame-shell is-dark"
-                      : "review-frame-shell is-light"
-                  }
-                >
-                  <p className="review-frame-label">
-                    {activeGap.next ? `다음 ${formatSeconds(activeGap.next.timestampSec)}` : "끝"}
-                  </p>
-                  {activeGap.next ? (
-                    <>
-                      <img
-                        className={reviewImageClassName}
-                        src={projectAssetUrl(project.id, activeGap.next.relativePath)}
-                        alt="Next score segment"
-                      />
-                      <div className="action-row">
-                        <button
-                          className="ghost-button"
-                          type="button"
-                          onClick={() => setSelectedFrameId(activeGap.next?.frameId ?? null)}
-                        >
-                          프레임
-                        </button>
-                      </div>
-                    </>
-                  ) : (
-                    <p className="preview-empty">악보 마지막 뒤</p>
-                  )}
-                </div>
-              </div>
-
-              <div className="manual-candidate-grid">
-                {activeGap.candidateCropIndices.length === 0 ? (
-                  <div className="empty-box">추가할 수 있는 후보 조각이 없습니다.</div>
-                ) : (
-                  activeGap.candidateCropIndices.map((cropIndex) => {
-                    const crop = findCropByIndex(editor.crops, cropIndex);
-
-                    if (!crop) {
-                      return null;
-                    }
-
-                    return (
-                      <article className="candidate-card stack-xs" key={crop.cropIndex}>
-                        <div
-                          className={
-                            previewBackground === "dark"
-                              ? "review-frame-shell is-dark"
-                              : "review-frame-shell is-light"
-                          }
-                        >
-                          <p className="review-frame-label">{formatSeconds(crop.timestampSec)}</p>
-                          <img
-                            className={reviewImageClassName}
-                            src={projectAssetUrl(project.id, crop.relativePath)}
-                            alt="Candidate score segment"
-                          />
-                        </div>
-                        <div className="action-row">
-                          <button
-                            className="ghost-button"
-                            type="button"
-                            onClick={() => setSelectedFrameId(crop.frameId)}
-                          >
-                            프레임
-                          </button>
-                          <button
-                            className="primary-button"
-                            type="button"
-                            onClick={() => void insertCropIntoGap(activeGap, crop.cropIndex)}
-                            disabled={isApplyingManualEdit}
-                          >
-                            추가
-                          </button>
-                        </div>
-                      </article>
-                    );
-                  })
-                )}
-              </div>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
+          {statusMessage ? <div className="status-box">{statusMessage}</div> : null}
+          {reviewSection}
+          {manualEditSection}
+        </>
+      )}
 
       {isScoreViewerOpen && assembledScoreUrl ? (
         <div

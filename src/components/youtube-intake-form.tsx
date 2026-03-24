@@ -16,6 +16,7 @@ interface YouTubeIntakeFormProps {
   isCapturing: boolean;
   captureError: string | null;
   onRecapture: () => void;
+  showHeader?: boolean;
 }
 
 export function YouTubeIntakeForm({
@@ -25,7 +26,8 @@ export function YouTubeIntakeForm({
   isRestoring = false,
   isCapturing,
   captureError,
-  onRecapture
+  onRecapture,
+  showHeader = true
 }: YouTubeIntakeFormProps) {
   const [url, setUrl] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -88,10 +90,17 @@ export function YouTubeIntakeForm({
 
   return (
     <section className="minimal-card stack-sm">
-      <div className="page-header">
-        <h1 className="page-title">YouTabMaker</h1>
-        <p className="status-line">{statusText}</p>
-      </div>
+      {showHeader ? (
+        <div className="page-header">
+          <h1 className="page-title">YouTabMaker</h1>
+          <p className="status-line">{statusText}</p>
+        </div>
+      ) : (
+        <div className="row-between">
+          <p className="section-label">YouTube URL</p>
+          <p className="status-line">{statusText}</p>
+        </div>
+      )}
 
       <form className="inline-form" onSubmit={handleSubmit}>
         <label className="grow" htmlFor="youtube-url">

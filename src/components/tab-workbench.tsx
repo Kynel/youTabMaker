@@ -7,6 +7,7 @@ import { YouTubeIntakeForm } from "@/components/youtube-intake-form";
 import type { DraftProject } from "@/lib/types";
 
 const LAST_PROJECT_STORAGE_KEY = "youtabmaker:last-project-id";
+type WorkspaceMode = "convert" | "edit";
 
 export function TabWorkbench() {
   const [project, setProject] = useState<DraftProject | null>(null);
@@ -14,6 +15,7 @@ export function TabWorkbench() {
   const [isCapturing, setIsCapturing] = useState(false);
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [resetVersion, setResetVersion] = useState(0);
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("convert");
   const captureRequestIdRef = useRef(0);
 
   async function captureFrames(projectToCapture: DraftProject) {
@@ -107,27 +109,78 @@ export function TabWorkbench() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
+  useEffect(() => {
+    if (workspaceMode === "edit" && !project?.assembledScore) {
+      setWorkspaceMode("convert");
+    }
+  }, [project?.assembledScore, workspaceMode]);
+
+  const statusText = isRestoring
+    ? "이전 작업 불러오는 중"
+    : isCapturing
+      ? "프레임 추출 중"
+      : project?.assemblyReview?.pendingCount
+        ? `검수 ${project.assemblyReview.pendingCount}`
+      : project?.assembledScore
+        ? `완성 ${project.assembledScore.stitchedFrameCount}`
+        : project?.frames?.length
+          ? `프레임 ${project.frames.length}`
+          : "대기";
+
   return (
     <section className="workspace-grid">
-      <YouTubeIntakeForm
-        key={`intake-${project?.id ?? "empty"}-${resetVersion}`}
-        project={project}
-        onProjectCreated={handleProjectCreated}
-        isRestoring={isRestoring}
-        isCapturing={isCapturing}
-        captureError={captureError}
-        onResetWorkspace={handleResetWorkspace}
-        onRecapture={() => {
-          if (project) {
-            void captureFrames(project);
-          }
-        }}
-      />
+      <section className="minimal-card stack-sm">
+        <div className="page-header">
+          <h1 className="page-title">YouTabMaker</h1>
+          <p className="status-line">{statusText}</p>
+        </div>
+        <div className="workspace-tabs" role="tablist" aria-label="Workbench mode">
+          <button
+            className={workspaceMode === "convert" ? "workspace-tab is-active" : "workspace-tab"}
+            type="button"
+            role="tab"
+            aria-selected={workspaceMode === "convert"}
+            onClick={() => setWorkspaceMode("convert")}
+          >
+            유튜브 변환
+          </button>
+          <button
+            className={workspaceMode === "edit" ? "workspace-tab is-active" : "workspace-tab"}
+            type="button"
+            role="tab"
+            aria-selected={workspaceMode === "edit"}
+            disabled={!project?.assembledScore}
+            onClick={() => setWorkspaceMode("edit")}
+          >
+            악보 수정
+          </button>
+        </div>
+      </section>
+
+      {workspaceMode === "convert" ? (
+        <YouTubeIntakeForm
+          key={`intake-${project?.id ?? "empty"}-${resetVersion}`}
+          project={project}
+          onProjectCreated={handleProjectCreated}
+          isRestoring={isRestoring}
+          isCapturing={isCapturing}
+          captureError={captureError}
+          onResetWorkspace={handleResetWorkspace}
+          onRecapture={() => {
+            if (project) {
+              void captureFrames(project);
+            }
+          }}
+          showHeader={false}
+        />
+      ) : null}
       <FrameSelectionLab
         key={`lab-${project?.id ?? "empty"}-${resetVersion}`}
         project={project}
         onProjectUpdated={handleProjectUpdated}
         isCapturing={isCapturing}
+        workspaceMode={workspaceMode}
+        onRequestWorkspaceMode={(nextWorkspaceMode) => setWorkspaceMode(nextWorkspaceMode)}
       />
     </section>
   );

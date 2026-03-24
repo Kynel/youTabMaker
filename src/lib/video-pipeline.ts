@@ -43,6 +43,7 @@ const MIN_NEW_CONTENT_PX = 32;
 const MIN_NEW_CONTENT_RATIO = 0.08;
 const SHEET_PADDING = 18;
 const PAGE_BREAK_GAP = 18;
+const MAX_TRANSITION_LOOKAHEAD = 8;
 const NORMALIZED_CROPS_DIRECTORY = path.posix.join("output", "normalized-crops");
 const ASSEMBLY_MANIFEST_PATH = path.posix.join("output", "assembly-manifest.json");
 
@@ -109,6 +110,7 @@ interface AssemblyManifest {
   normalizationWidth: number;
   roi: RoiSelection;
   crops: CropManifestEntry[];
+  autoOrderedCropIndices?: number[];
   transitions: TransitionManifestEntry[];
 }
 
@@ -569,10 +571,21 @@ function buildAssemblyCropAsset(crop: CropManifestEntry): AssemblyCropAsset {
 
 function buildAssemblyReviewState(
   manifest: AssemblyManifest,
-  decisions: Partial<Record<string, AssemblyReviewDecision>>
+  decisions: Partial<Record<string, AssemblyReviewDecision>>,
+  orderedCropIndices: number[]
 ): AssemblyReviewState {
+  const adjacentTransitionKeys = new Set(
+    orderedCropIndices.slice(1).map((currentCropIndex, index) =>
+      buildTransitionKey(orderedCropIndices[index] ?? -1, currentCropIndex)
+    )
+  );
   const items = manifest.transitions
-    .filter((transition) => !transition.autoTrimApplied && transition.overlapTrimCandidatePx > 0)
+    .filter(
+      (transition) =>
+        adjacentTransitionKeys.has(buildTransitionKey(transition.previousCropIndex, transition.currentCropIndex)) &&
+        !transition.autoTrimApplied &&
+        transition.overlapTrimCandidatePx > 0
+    )
     .map((transition) => {
       const previousCrop = manifest.crops[transition.previousCropIndex];
       const currentCrop = manifest.crops[transition.currentCropIndex];
@@ -620,7 +633,9 @@ async function buildStitchedCropsFromManifest(
             cropIndex < manifest.crops.length &&
             cropIndices.indexOf(cropIndex) === position
         )
-      : manifest.crops.map((crop) => crop.index);
+      : (manifest.autoOrderedCropIndices?.length ?? 0) > 0
+        ? manifest.autoOrderedCropIndices ?? []
+        : manifest.crops.map((crop) => crop.index);
   const forcedCropIndices = options.forcedCropIndices?.filter((cropIndex) => requestedOrder.includes(cropIndex)) ?? [];
   const forcedCropIndexSet = new Set(forcedCropIndices);
   const transitionByPairKey = new Map(
@@ -823,7 +838,7 @@ async function renderAssembledScoreFromManifest(
     });
   }
 
-  const review = buildAssemblyReviewState(manifest, decisions);
+  const review = buildAssemblyReviewState(manifest, decisions, orderedCropIndices);
   const editor = buildAssemblyEditorState(manifest, stitchedCrops, orderedCropIndices, forcedCropIndices);
   const generatedAt = new Date().toISOString();
   const scoreRelativePath = path.posix.join("output", "assembled-score.png");
@@ -845,6 +860,7 @@ async function renderAssembledScoreFromManifest(
           items: review.items
         },
         editor: {
+          autoOrderedCropIndices: manifest.autoOrderedCropIndices ?? orderedCropIndices,
           orderedCropIndices,
           forcedCropIndices
         },
@@ -942,6 +958,7 @@ export async function assembleProjectScore(
   await mkdir(normalizedCropsDirectory, { recursive: true });
 
   const preparedCrops: PreparedCrop[] = [];
+  const autoOrderedCropIndices: number[] = [];
 
   for (const [frameIndex, frame] of frames.entries()) {
     const frameAbsolutePath = getProjectAssetAbsolutePath(projectId, frame.relativePath);
@@ -974,18 +991,6 @@ export async function assembleProjectScore(
 
     const signature = await computeCropSignature(cropBuffer);
 
-    if (signature.darkRatio < MIN_TAB_DARK_RATIO) {
-      continue;
-    }
-
-    const recentDuplicate = preparedCrops
-      .slice(-RECENT_DUPLICATE_WINDOW)
-      .some((crop) => hammingDistance(signature.hash, crop.hash) <= DUPLICATE_HASH_DISTANCE);
-
-    if (recentDuplicate) {
-      continue;
-    }
-
     preparedCrops.push({
       frame,
       buffer: cropBuffer,
@@ -993,6 +998,18 @@ export async function assembleProjectScore(
       height: cropMetadata.height,
       hash: signature.hash
     });
+
+    const cropIndex = preparedCrops.length - 1;
+
+    if (signature.darkRatio >= MIN_TAB_DARK_RATIO) {
+      const recentDuplicate = autoOrderedCropIndices
+        .slice(-RECENT_DUPLICATE_WINDOW)
+        .some((recentCropIndex) => hammingDistance(signature.hash, preparedCrops[recentCropIndex]?.hash ?? "") <= DUPLICATE_HASH_DISTANCE);
+
+      if (!recentDuplicate) {
+        autoOrderedCropIndices.push(cropIndex);
+      }
+    }
 
     if (onProgress && (frameIndex === 0 || frameIndex === frames.length - 1 || (frameIndex + 1) % 4 === 0)) {
       await onProgress({
@@ -1009,6 +1026,10 @@ export async function assembleProjectScore(
 
   if (preparedCrops.length === 0) {
     throw new Error("No tab crops remained after filtering. Try selecting a different ROI.");
+  }
+
+  if (autoOrderedCropIndices.length === 0) {
+    throw new Error("No tab-like crops were detected in the selected ROI. Try selecting a different ROI.");
   }
 
   const targetWidth = selectNormalizationWidth(preparedCrops.map((crop) => crop.width));
@@ -1065,44 +1086,51 @@ export async function assembleProjectScore(
 
   const transitions: TransitionManifestEntry[] = [];
 
-  for (let cropIndex = 1; cropIndex < normalizedCrops.length; cropIndex += 1) {
-    const previousCrop = normalizedCrops[cropIndex - 1];
-    const currentCrop = normalizedCrops[cropIndex];
-    const overlapMatch = findVerticalOverlap(previousCrop.analysis, currentCrop.analysis);
+  for (let previousCropIndex = 0; previousCropIndex < normalizedCrops.length - 1; previousCropIndex += 1) {
+    const previousCrop = normalizedCrops[previousCropIndex];
 
-    if (!overlapMatch) {
-      continue;
-    }
-
-    const overlapTrimCandidatePx = Math.min(
-      currentCrop.height - 1,
-      Math.max(0, Math.round((overlapMatch.overlapRows / currentCrop.analysis.height) * currentCrop.height))
-    );
-    const overlapTrimRatio = overlapTrimCandidatePx / Math.max(1, currentCrop.height);
-
-    if (
-      overlapTrimCandidatePx <= 0 ||
-      overlapTrimRatio > MAX_OVERLAP_TRIM_RATIO ||
-      overlapMatch.score > REVIEW_OVERLAP_SCORE
+    for (
+      let currentCropIndex = previousCropIndex + 1;
+      currentCropIndex < Math.min(normalizedCrops.length, previousCropIndex + MAX_TRANSITION_LOOKAHEAD + 1);
+      currentCropIndex += 1
     ) {
-      continue;
+      const currentCrop = normalizedCrops[currentCropIndex];
+      const overlapMatch = findVerticalOverlap(previousCrop.analysis, currentCrop.analysis);
+
+      if (!overlapMatch) {
+        continue;
+      }
+
+      const overlapTrimCandidatePx = Math.min(
+        currentCrop.height - 1,
+        Math.max(0, Math.round((overlapMatch.overlapRows / currentCrop.analysis.height) * currentCrop.height))
+      );
+      const overlapTrimRatio = overlapTrimCandidatePx / Math.max(1, currentCrop.height);
+
+      if (
+        overlapTrimCandidatePx <= 0 ||
+        overlapTrimRatio > MAX_OVERLAP_TRIM_RATIO ||
+        overlapMatch.score > REVIEW_OVERLAP_SCORE
+      ) {
+        continue;
+      }
+
+      const previousEntry = manifestCrops[previousCropIndex];
+      const currentEntry = manifestCrops[currentCropIndex];
+      const autoTrimApplied = isSafeAutomaticTrim(overlapMatch.score, overlapTrimRatio);
+
+      transitions.push({
+        id: buildTransitionId(previousEntry, currentEntry),
+        previousCropIndex,
+        currentCropIndex,
+        overlapScore: overlapMatch.score,
+        overlapTrimCandidatePx,
+        overlapTrimRatio,
+        autoTrimApplied,
+        recommendedDecision: "keep_both",
+        reason: buildReviewReason(overlapMatch.score, overlapTrimRatio)
+      });
     }
-
-    const previousEntry = manifestCrops[cropIndex - 1];
-    const currentEntry = manifestCrops[cropIndex];
-    const autoTrimApplied = isSafeAutomaticTrim(overlapMatch.score, overlapTrimRatio);
-
-    transitions.push({
-      id: buildTransitionId(previousEntry, currentEntry),
-      previousCropIndex: cropIndex - 1,
-      currentCropIndex: cropIndex,
-      overlapScore: overlapMatch.score,
-      overlapTrimCandidatePx,
-      overlapTrimRatio,
-      autoTrimApplied,
-      recommendedDecision: "keep_both",
-      reason: buildReviewReason(overlapMatch.score, overlapTrimRatio)
-    });
   }
 
   const manifest: AssemblyManifest = {
@@ -1111,6 +1139,7 @@ export async function assembleProjectScore(
     normalizationWidth: targetWidth,
     roi,
     crops: manifestCrops,
+    autoOrderedCropIndices,
     transitions
   };
 

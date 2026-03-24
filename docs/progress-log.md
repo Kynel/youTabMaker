@@ -59,6 +59,11 @@
 - the assembly pipeline now persists an editor model of the current stitched order so manual add/remove fixes can re-render the final score without re-capturing the video
 - a dedicated manual-edit route now supports deleting a stitched segment and inserting an omitted crop back into the score in real time
 - the workbench now highlights editable gaps, shows previous/next context around a suspected omission, and lets the user preview nearby tab crops before adding them
+- the workbench is now split into `유튜브 변환` and `악보 수정` tabs, so ROI work and score-edit work no longer compete on one crowded screen
+- the `악보 수정` tab now opens with a large full-width `전체 Tab` panel so Manual Edit decisions can be made while looking at the real stitched score layout
+- the `악보 수정` tab now lets the user click stitched regions directly on the large score to remove them, or click in-score `+` handles between regions to open insertion candidates
+- the in-score `+` action now opens a large popup anchored on the score, and the popup lists the full 1-second crop catalog instead of a tiny recommendation subset
+- edit mode now keeps each stitched segment's timestamp visible at the top-left of the large score overlay
 - project documentation and agent handoff docs
 
 ### Verification
@@ -83,6 +88,7 @@
 - Verified in-flight `processing` state during `POST /api/projects/draft-df510cbf/capture`
 - Confirmed the initial Next.js app builds successfully
 - Initialized a local Git repository
+- Re-verified `GET /` returns `200 OK` after splitting the workbench into convert/edit tabs and enlarging the edit-mode score view
 
 ### Remaining Work
 
