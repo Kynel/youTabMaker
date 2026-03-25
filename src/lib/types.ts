@@ -108,6 +108,35 @@ export interface SavedRoi {
   savedAt: string;
 }
 
+export interface SavedRoiSegment extends SavedRoi {
+  id: string;
+  startTimestampSec: number;
+  startFrameId: string | null;
+}
+
+export interface SavedRoiTimeline {
+  updatedAt: string;
+  segments: SavedRoiSegment[];
+}
+
+export interface AssemblyFailureState {
+  generatedAt: string;
+  reason: string;
+  failedFrameIds: string[];
+}
+
+export interface SavedProjectSummary {
+  id: string;
+  title: string;
+  sourceUrl: string;
+  normalizedUrl: string;
+  createdAt: string;
+  updatedAt: string;
+  frameCount: number;
+  stitchedFrameCount: number;
+  hasAssembledScore: boolean;
+}
+
 export interface RuntimeInspection {
   dependencies: DependencyStatus[];
   canProcessYoutubeUrl: boolean;
@@ -137,6 +166,8 @@ export interface ProjectProcessingStatus {
 export interface DraftProject {
   id: string;
   createdAt: string;
+  updatedAt: string;
+  title: string;
   sourceUrl: string;
   normalizedUrl: string;
   recommendedMode: ProcessingMode;
@@ -149,8 +180,10 @@ export interface DraftProject {
   assemblyEditor?: AssemblyEditorState;
   assemblyManualEdit?: AssemblyManualEditState;
   assemblyReview?: AssemblyReviewState;
+  assemblyFailure?: AssemblyFailureState;
   sourceFrame?: SourceFrameAsset;
   roi?: SavedRoi;
+  roiTimeline?: SavedRoiTimeline;
   processing?: ProjectProcessingStatus;
 }
 

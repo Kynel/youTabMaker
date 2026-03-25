@@ -82,6 +82,7 @@ export async function POST(
     return NextResponse.json({ project: updatedProject });
   } catch (error) {
     await progress.fail(error instanceof Error ? error.message : "Failed to apply the review decisions.");
+    await progress.clear();
 
     return NextResponse.json(
       {

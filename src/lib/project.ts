@@ -43,10 +43,26 @@ function buildPipeline(runtime: RuntimeInspection): PipelineStep[] {
 }
 
 export function createDraftProject(sourceUrl: string, normalizedUrl: string, runtime: RuntimeInspection): DraftProject {
+  const createdAt = new Date().toISOString();
+  let title = "새 작업";
+
+  try {
+    const normalized = new URL(normalizedUrl);
+    const videoId = normalized.searchParams.get("v");
+
+    if (videoId) {
+      title = `영상 ${videoId}`;
+    }
+  } catch {
+    // Fall back to the default title when URL parsing fails unexpectedly.
+  }
+
   return applyRuntimeToProject(
     {
       id: `draft-${randomUUID().slice(0, 8)}`,
-      createdAt: new Date().toISOString(),
+      createdAt,
+      updatedAt: createdAt,
+      title,
       sourceUrl,
       normalizedUrl,
       recommendedMode: runtime.canProcessYoutubeUrl ? "youtube-url" : "image-upload",

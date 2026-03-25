@@ -58,8 +58,22 @@ export function createProjectProgressReporter(projectId: string, kind: ProjectPr
     await writeChain;
   }
 
+  async function clear() {
+    writeChain = writeChain
+      .then(async () => {
+        await updateDraftProject(projectId, (project) => ({
+          ...project,
+          processing: undefined
+        }));
+      })
+      .catch(() => undefined);
+
+    await writeChain;
+  }
+
   return {
     report: persist,
+    clear,
     async fail(detail: string) {
       await persist({
         stage: "failed",

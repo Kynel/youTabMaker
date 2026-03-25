@@ -1,8 +1,8 @@
 import os from "node:os";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import type { DraftProject, SavedRoi, SourceFrameAsset } from "@/lib/types";
+import type { DraftProject, SavedProjectSummary, SavedRoi, SourceFrameAsset } from "@/lib/types";
 
 const DATA_ROOT = process.env.VERCEL
   ? path.join(os.tmpdir(), "youtabmaker")
@@ -15,6 +15,16 @@ export function getProjectDirectory(projectId: string) {
 
 function getProjectFile(projectId: string) {
   return path.join(getProjectDirectory(projectId), "project.json");
+}
+
+function normalizeDraftProject(project: DraftProject) {
+  const normalizedTitle = project.title?.trim() || project.normalizedUrl || project.id;
+
+  return {
+    ...project,
+    title: normalizedTitle,
+    updatedAt: project.updatedAt ?? project.createdAt
+  } satisfies DraftProject;
 }
 
 export function getProjectDownloadsDirectory(projectId: string) {
@@ -62,13 +72,49 @@ export async function resetProjectGeneratedAssets(projectId: string) {
 
 export async function saveDraftProject(project: DraftProject) {
   await ensureProjectDirectory(project.id);
-  await writeFile(getProjectFile(project.id), JSON.stringify(project, null, 2), "utf8");
-  return project;
+  const normalizedProject = normalizeDraftProject({
+    ...project,
+    updatedAt: new Date().toISOString()
+  });
+  await writeFile(getProjectFile(project.id), JSON.stringify(normalizedProject, null, 2), "utf8");
+  return normalizedProject;
 }
 
 export async function loadDraftProject(projectId: string) {
   const raw = await readFile(getProjectFile(projectId), "utf8");
-  return JSON.parse(raw) as DraftProject;
+  return normalizeDraftProject(JSON.parse(raw) as DraftProject);
+}
+
+export async function listDraftProjectSummaries(): Promise<SavedProjectSummary[]> {
+  await mkdir(PROJECTS_ROOT, { recursive: true });
+  const entries = await readdir(PROJECTS_ROOT, { withFileTypes: true });
+  const projects = await Promise.all(
+    entries
+      .filter((entry) => entry.isDirectory())
+      .map(async (entry) => {
+        try {
+          const project = await loadDraftProject(entry.name);
+
+          return {
+            id: project.id,
+            title: project.title,
+            sourceUrl: project.sourceUrl,
+            normalizedUrl: project.normalizedUrl,
+            createdAt: project.createdAt,
+            updatedAt: project.updatedAt,
+            frameCount: project.frames?.length ?? 0,
+            stitchedFrameCount: project.assembledScore?.stitchedFrameCount ?? 0,
+            hasAssembledScore: Boolean(project.assembledScore)
+          } satisfies SavedProjectSummary;
+        } catch {
+          return null;
+        }
+      })
+  );
+
+  return projects
+    .filter((project): project is SavedProjectSummary => Boolean(project))
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
 
 export async function updateDraftProject(

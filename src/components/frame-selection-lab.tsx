@@ -19,16 +19,17 @@ import {
   X
 } from "lucide-react";
 
+import { areRoiSelectionsEqual, findActiveRoiSegment, getProjectRoiSegments } from "@/lib/roi";
 import type {
   AssembledScoreAsset,
   AssemblyCropAsset,
   AssemblyEditorState,
-  AssemblyReviewDecision,
   AssemblySequenceItem,
   DraftProject,
   ProjectFrameAsset,
   ProjectProcessingStatus,
-  RoiSelection
+  RoiSelection,
+  SavedRoiSegment
 } from "@/lib/types";
 
 interface DragState {
@@ -103,6 +104,21 @@ function normalizeRect(selection: RawSelection): RawSelection {
   return { x, y, width, height };
 }
 
+function clampRawSelectionToBounds(selection: RawSelection, boundsWidth: number, boundsHeight: number): RawSelection {
+  const normalized = normalizeRect(selection);
+  const left = clampNumber(normalized.x, 0, boundsWidth);
+  const top = clampNumber(normalized.y, 0, boundsHeight);
+  const right = clampNumber(normalized.x + normalized.width, 0, boundsWidth);
+  const bottom = clampNumber(normalized.y + normalized.height, 0, boundsHeight);
+
+  return {
+    x: left,
+    y: top,
+    width: Math.max(0, right - left),
+    height: Math.max(0, bottom - top)
+  };
+}
+
 function projectAssetUrl(projectId: string, relativePath: string) {
   return `/api/projects/${projectId}/assets/${relativePath.split("/").map(encodeURIComponent).join("/")}`;
 }
@@ -131,16 +147,25 @@ function formatSeconds(totalSeconds: number) {
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
+function formatRoiSelectionModeLabel(selectionMode: "manual" | "bottom-band-suggestion") {
+  return selectionMode === "bottom-band-suggestion" ? "자동 제안" : "수동 지정";
+}
+
+function findClosestFrameForSegment(frames: ProjectFrameAsset[], segment: SavedRoiSegment) {
+  return (
+    frames.find((frame) => frame.id === segment.startFrameId) ??
+    frames.find((frame) => frame.timestampSec >= segment.startTimestampSec) ??
+    frames.at(-1) ??
+    null
+  );
+}
+
 function clampProgress(progressPercent: number | undefined) {
   if (typeof progressPercent !== "number" || !Number.isFinite(progressPercent)) {
     return 0;
   }
 
   return Math.max(0, Math.min(100, Math.round(progressPercent)));
-}
-
-function formatReviewPercent(ratio: number) {
-  return `${Math.max(0, Math.round(ratio * 100))}%`;
 }
 
 function formatViewerScrollSpeed(speed: number) {
@@ -286,20 +311,21 @@ export function FrameSelectionLab({
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewerBodyRef = useRef<HTMLDivElement | null>(null);
   const viewerAutoScrollPositionRef = useRef(0);
+  const roiSelectionSyncKeyRef = useRef<string | null>(null);
   const [imageElement, setImageElement] = useState<HTMLImageElement | null>(null);
   const [selection, setSelection] = useState<RawSelection | null>(null);
   const [dragState, setDragState] = useState<DragState | null>(null);
   const [selectedFrameId, setSelectedFrameId] = useState<string | null>(null);
   const [selectionMode, setSelectionMode] = useState<"manual" | "bottom-band-suggestion">("manual");
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [isSavingRoi, setIsSavingRoi] = useState(false);
+  const [deletingRoiSegmentId, setDeletingRoiSegmentId] = useState<string | null>(null);
   const [isAssembling, setIsAssembling] = useState(false);
-  const [isApplyingReview, setIsApplyingReview] = useState(false);
   const [isApplyingManualEdit, setIsApplyingManualEdit] = useState(false);
   const [isScoreViewerOpen, setIsScoreViewerOpen] = useState(false);
   const [previewBackground, setPreviewBackground] = useState<PreviewBackground>("dark");
   const [scoreColorMode, setScoreColorMode] = useState<ScoreColorMode>("original");
   const [isDownloadingScore, setIsDownloadingScore] = useState(false);
-  const [reviewDraft, setReviewDraft] = useState<Record<string, AssemblyReviewDecision>>({});
   const [activeGapKey, setActiveGapKey] = useState<string | null>(null);
   const [activeScoreCropIndex, setActiveScoreCropIndex] = useState<number | null>(null);
   const [activeGapPreviewTarget, setActiveGapPreviewTarget] = useState<GapPreviewTarget | null>(null);
@@ -314,9 +340,11 @@ export function FrameSelectionLab({
 
   const frames = project?.frames ?? [];
   const projectId = project?.id ?? null;
+  const roiSegments = getProjectRoiSegments(project);
   const editor = project?.assemblyEditor;
-  const reviewItems = project?.assemblyReview?.items ?? [];
   const manualEditGaps = buildManualEditGaps(editor);
+  const usedFrameIdSet = new Set(editor?.sequence.map((item) => item.frameId) ?? []);
+  const failedAssemblyFrameIdSet = new Set(project?.assemblyFailure?.failedFrameIds ?? []);
   const activeGap = manualEditGaps.find((gap) => gap.key === activeGapKey) ?? null;
   const activeGapCandidateCrops =
     activeGap && editor
@@ -332,8 +360,6 @@ export function FrameSelectionLab({
           ? activeGap.next
           : activeGapCandidateCrops.find((crop) => crop.cropIndex === activeGapPreviewTarget.cropIndex) ?? null
       : null;
-  const selectedSequenceItem =
-    activeScoreCropIndex != null ? editor?.sequence.find((item) => item.cropIndex === activeScoreCropIndex) ?? null : null;
   const scoreOverlayLayout = buildScoreOverlayLayout(editor, project?.assembledScore, manualEditGaps);
   const assembledScoreUrl =
     project?.assembledScore && project
@@ -384,11 +410,17 @@ export function FrameSelectionLab({
     viewerMode === "page" &&
     viewerPageCount > 0 &&
     viewerPageStartIndex + viewerPageSpread < viewerPageCount;
+  const canRemoveSequenceCrop = Boolean(editor && editor.orderedCropIndices.length > 1);
 
   const selectedFrame =
     project && selectedFrameId ? frames.find((frame) => frame.id === selectedFrameId) ?? null : null;
+  const activeRoiSegment =
+    selectedFrame != null
+      ? findActiveRoiSegment(roiSegments, selectedFrame.timestampSec)
+      : roiSegments[0] ?? null;
+  const activeProcessing = project?.processing?.stage === "failed" ? undefined : project?.processing;
   const shouldPollProcessing = Boolean(
-    project && (isCapturing || isAssembling || isApplyingReview || isApplyingManualEdit || project.processing)
+    project && (isCapturing || isAssembling || isApplyingManualEdit || activeProcessing)
   );
   const processingState:
     | ProjectProcessingStatus
@@ -403,7 +435,7 @@ export function FrameSelectionLab({
         unit?: string;
       }
     | null =
-    project?.processing ??
+    activeProcessing ??
     (isCapturing
       ? {
           kind: "capture",
@@ -420,15 +452,7 @@ export function FrameSelectionLab({
             detail: "작업 상태를 불러오고 있습니다.",
             progressPercent: 4
           }
-        : isApplyingReview
-          ? {
-              kind: "assemble",
-              stage: "reviewing",
-              label: "검수 반영 중",
-              detail: "의심 구간 선택을 저장하고 있습니다.",
-              progressPercent: 4
-            }
-          : isApplyingManualEdit
+        : isApplyingManualEdit
             ? {
                 kind: "assemble",
                 stage: "editing",
@@ -437,6 +461,14 @@ export function FrameSelectionLab({
                 progressPercent: 4
               }
           : null);
+
+  useEffect(() => {
+    if (project?.processing?.stage !== "failed") {
+      return;
+    }
+
+    setStatusMessage((currentMessage) => currentMessage ?? project.processing?.detail ?? "처리에 실패했습니다.");
+  }, [project?.processing?.detail, project?.processing?.stage]);
 
   useEffect(() => {
     if (frames.length === 0) {
@@ -453,6 +485,10 @@ export function FrameSelectionLab({
       return frames[0]?.id ?? null;
     });
   }, [frames]);
+
+  useEffect(() => {
+    roiSelectionSyncKeyRef.current = null;
+  }, [project?.id]);
 
   useEffect(() => {
     if (!project || !selectedFrame) {
@@ -472,35 +508,31 @@ export function FrameSelectionLab({
       return;
     }
 
-    if (project?.roi?.selection) {
-      setSelection(toRawSelection(project.roi.selection));
-      setSelectionMode(project.roi.selectionMode);
+    const syncKey = activeRoiSegment
+      ? `${project?.id ?? "project"}:${selectedFrame?.id ?? "frame"}:${activeRoiSegment.id}:${activeRoiSegment.savedAt}`
+      : `${project?.id ?? "project"}:unsaved:${imageElement.naturalWidth}x${imageElement.naturalHeight}`;
+
+    if (roiSelectionSyncKeyRef.current === syncKey) {
+      return;
+    }
+
+    roiSelectionSyncKeyRef.current = syncKey;
+
+    if (activeRoiSegment) {
+      setSelection(
+        clampRawSelectionToBounds(
+          toRawSelection(activeRoiSegment.selection),
+          imageElement.naturalWidth,
+          imageElement.naturalHeight
+        )
+      );
+      setSelectionMode(activeRoiSegment.selectionMode);
       return;
     }
 
     setSelection(buildBottomBandSelection(imageElement.naturalWidth, imageElement.naturalHeight));
     setSelectionMode("bottom-band-suggestion");
-  }, [project?.id, project?.roi?.savedAt, imageElement]);
-
-  useEffect(() => {
-    if (!project?.assemblyReview) {
-      setReviewDraft({});
-      return;
-    }
-
-    setReviewDraft(
-      project.assemblyReview.items.reduce(
-        (accumulator, item) => {
-          if (item.decision) {
-            accumulator[item.id] = item.decision;
-          }
-
-          return accumulator;
-        },
-        {} as Record<string, AssemblyReviewDecision>
-      )
-    );
-  }, [project?.id, project?.assemblyReview?.generatedAt]);
+  }, [activeRoiSegment?.id, activeRoiSegment?.savedAt, imageElement, project?.id, selectedFrame?.id]);
 
   useEffect(() => {
     if (!activeGapKey) {
@@ -837,7 +869,7 @@ export function FrameSelectionLab({
       context.fillText(label, labelX + 7, labelY + 14);
       context.restore();
     }
-  }, [imageElement, selection]);
+  }, [imageElement, selection, workspaceMode]);
 
   useEffect(() => {
     const previewCanvas = previewCanvasRef.current;
@@ -877,7 +909,7 @@ export function FrameSelectionLab({
       previewCanvas.width,
       previewCanvas.height
     );
-  }, [imageElement, selection]);
+  }, [imageElement, selection, workspaceMode]);
 
   function getCanvasPoint(event: React.PointerEvent<HTMLCanvasElement>) {
     if (!canvasRef.current || !imageElement) {
@@ -889,8 +921,8 @@ export function FrameSelectionLab({
     const scaleY = imageElement.naturalHeight / rect.height;
 
     return {
-      x: (event.clientX - rect.left) * scaleX,
-      y: (event.clientY - rect.top) * scaleY
+      x: clampNumber((event.clientX - rect.left) * scaleX, 0, imageElement.naturalWidth),
+      y: clampNumber((event.clientY - rect.top) * scaleY, 0, imageElement.naturalHeight)
     };
   }
 
@@ -953,6 +985,19 @@ export function FrameSelectionLab({
   }
 
   function clearSelection() {
+    if (activeRoiSegment) {
+      setSelection(
+        clampRawSelectionToBounds(
+          toRawSelection(activeRoiSegment.selection),
+          imageElement?.naturalWidth ?? activeRoiSegment.selection.x + activeRoiSegment.selection.width,
+          imageElement?.naturalHeight ?? activeRoiSegment.selection.y + activeRoiSegment.selection.height
+        )
+      );
+      setSelectionMode(activeRoiSegment.selectionMode);
+      setStatusMessage("저장된 ROI로 되돌렸습니다.");
+      return;
+    }
+
     setSelection(null);
     setSelectionMode("manual");
   }
@@ -962,7 +1007,7 @@ export function FrameSelectionLab({
       return null;
     }
 
-    const normalized = normalizeRect(selection);
+    const normalized = clampRawSelectionToBounds(selection, imageElement.naturalWidth, imageElement.naturalHeight);
 
     return {
       x: Math.round(normalized.x),
@@ -979,37 +1024,55 @@ export function FrameSelectionLab({
   }
 
   const roi = buildRoiSelection();
-
-  const unresolvedReviewCount = reviewItems.filter((item) => !reviewDraft[item.id]).length;
-  const resolvedReviewCount = reviewItems.length - unresolvedReviewCount;
-  const hasUnsavedReviewChanges = reviewItems.some(
-    (item) => (reviewDraft[item.id] ?? null) !== (item.decision ?? null)
+  const hasSavedRoiSegments = roiSegments.length > 0;
+  const hasUnsavedRoiChanges = Boolean(
+    roi &&
+      (!activeRoiSegment ||
+        !areRoiSelectionsEqual(roi, activeRoiSegment.selection) ||
+        selectionMode !== activeRoiSegment.selectionMode)
   );
-  const requiresReviewConfirmation = reviewItems.length > 0;
+  const canGenerateFullScore = Boolean(
+    project && ((hasSavedRoiSegments && !hasUnsavedRoiChanges) || (!hasSavedRoiSegments && roi))
+  );
+
   const manualInsertedCount = editor?.forcedCropIndices.length ?? 0;
-  const isExportLocked =
-    (requiresReviewConfirmation && (unresolvedReviewCount > 0 || hasUnsavedReviewChanges)) ||
-    isApplyingManualEdit;
+  const isExportLocked = isApplyingManualEdit;
   const isConvertMode = workspaceMode === "convert";
 
-  async function generateFullScore() {
+  async function saveRoiSegment(action: "replace-active" | "insert-from-current") {
     if (!project || !roi) {
       return;
     }
 
-    setSelection(toRawSelection(roi));
-    setIsAssembling(true);
+    const selectedOrFirstFrame = selectedFrame ?? frames[0] ?? null;
+    const startTimestampSec =
+      action === "insert-from-current"
+        ? selectedOrFirstFrame?.timestampSec ?? 0
+        : activeRoiSegment?.startTimestampSec ?? 0;
+    const startFrameId =
+      action === "insert-from-current"
+        ? selectedOrFirstFrame?.id ?? null
+        : activeRoiSegment?.startFrameId ?? selectedOrFirstFrame?.id ?? null;
+    const normalizedStartFrameId =
+      action === "replace-active" && !activeRoiSegment
+        ? frames[0]?.id ?? startFrameId
+        : startFrameId;
+
+    setIsSavingRoi(true);
     setStatusMessage(null);
 
     try {
-      const response = await fetch(`/api/projects/${project.id}/assemble`, {
+      const response = await fetch(`/api/projects/${project.id}/roi`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
+          action,
           roi,
-          selectionMode
+          selectionMode,
+          startTimestampSec,
+          startFrameId: normalizedStartFrameId
         })
       });
 
@@ -1018,64 +1081,119 @@ export function FrameSelectionLab({
         | null;
 
       if (!response.ok || !payload?.project) {
+        throw new Error(payload?.error ?? "ROI 구간을 저장하지 못했습니다.");
+      }
+
+      onProjectUpdated(payload.project);
+      setStatusMessage(
+        action === "insert-from-current"
+          ? `${formatSeconds(startTimestampSec)}부터 새 ROI 구간을 저장했습니다.`
+          : "현재 ROI 구간을 저장했습니다."
+      );
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "ROI 구간을 저장하지 못했습니다.");
+    } finally {
+      setIsSavingRoi(false);
+    }
+  }
+
+  async function deleteRoiSegment(segmentId: string) {
+    if (!project) {
+      return;
+    }
+
+    setDeletingRoiSegmentId(segmentId);
+    setStatusMessage(null);
+
+    try {
+      const response = await fetch(`/api/projects/${project.id}/roi`, {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          segmentId
+        })
+      });
+
+      const payload = (await response.json().catch(() => null)) as
+        | { project?: DraftProject; error?: string }
+        | null;
+
+      if (!response.ok || !payload?.project) {
+        throw new Error(payload?.error ?? "ROI 구간을 삭제하지 못했습니다.");
+      }
+
+      onProjectUpdated(payload.project);
+      setStatusMessage("선택한 ROI 구간을 삭제했습니다.");
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "ROI 구간을 삭제하지 못했습니다.");
+    } finally {
+      setDeletingRoiSegmentId((currentSegmentId) => (currentSegmentId === segmentId ? null : currentSegmentId));
+    }
+  }
+
+  async function generateFullScore() {
+    if (!project) {
+      return;
+    }
+
+    if (hasSavedRoiSegments && hasUnsavedRoiChanges) {
+      setStatusMessage("ROI 변경사항을 먼저 저장한 뒤 전체 Tab를 생성해 주세요.");
+      return;
+    }
+
+    if (!hasSavedRoiSegments && !roi) {
+      return;
+    }
+
+    if (roi) {
+      setSelection(toRawSelection(roi));
+    }
+
+    setIsAssembling(true);
+    setStatusMessage(null);
+
+    try {
+      const requestBody = hasSavedRoiSegments
+        ? {}
+        : {
+            roi,
+            selectionMode
+          };
+      const response = await fetch(`/api/projects/${project.id}/assemble`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(requestBody)
+      });
+
+      const payload = (await response.json().catch(() => null)) as
+        | { project?: DraftProject; error?: string }
+        | null;
+
+      if (!response.ok) {
+        if (payload?.project) {
+          onProjectUpdated(payload.project);
+        }
+
+        throw new Error(payload?.error ?? "Failed to assemble the full tab score.");
+      }
+
+      if (!payload?.project) {
         throw new Error(payload?.error ?? "Failed to assemble the full tab score.");
       }
 
       onProjectUpdated(payload.project);
       onRequestWorkspaceMode("edit");
-      setStatusMessage(
-        payload.project.assemblyReview?.totalCount
-          ? `의심 구간 ${payload.project.assemblyReview.totalCount}개를 추렸습니다. 검수 후 PNG를 내보낼 수 있습니다.`
-          : "영상 전체 tab를 하나의 악보로 완성했습니다."
-      );
+      setStatusMessage("영상 전체 tab를 하나의 악보로 완성했습니다. 필요하면 악보 수정 탭에서 조각을 추가/삭제하세요.");
     } catch (error) {
       setStatusMessage(
         error instanceof Error ? error.message : "Failed to assemble the full tab score."
       );
     } finally {
       setIsAssembling(false);
-    }
-  }
-
-  async function applyReview() {
-    if (!project || reviewItems.length === 0 || unresolvedReviewCount > 0) {
-      return;
-    }
-
-    setIsApplyingReview(true);
-    setStatusMessage(null);
-
-    try {
-      const response = await fetch(`/api/projects/${project.id}/review`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          decisions: reviewDraft
-        })
-      });
-
-      const payload = (await response.json().catch(() => null)) as
-        | { project?: DraftProject; error?: string }
-        | null;
-
-      if (!response.ok || !payload?.project) {
-        throw new Error(payload?.error ?? "Failed to apply the review decisions.");
-      }
-
-      onProjectUpdated(payload.project);
-      setStatusMessage(
-        payload.project.assemblyReview?.pendingCount
-          ? `검수 선택을 저장했습니다. 남은 보류 ${payload.project.assemblyReview.pendingCount}개`
-          : "의심 구간 검수를 반영했습니다."
-      );
-    } catch (error) {
-      setStatusMessage(
-        error instanceof Error ? error.message : "Failed to apply the review decisions."
-      );
-    } finally {
-      setIsApplyingReview(false);
     }
   }
 
@@ -1246,38 +1364,14 @@ export function FrameSelectionLab({
     }
   }
 
-  function updateReviewDecision(reviewId: string, decision: AssemblyReviewDecision) {
-    setReviewDraft((currentDraft) => ({
-      ...currentDraft,
-      [reviewId]: decision
-    }));
-  }
+  function jumpToRoiSegment(segment: SavedRoiSegment) {
+    const targetFrame = findClosestFrameForSegment(frames, segment);
 
-  function applyRecommendedReviewChoices() {
-    setReviewDraft((currentDraft) =>
-      reviewItems.reduce(
-        (accumulator, item) => {
-          accumulator[item.id] = currentDraft[item.id] ?? item.recommendedDecision;
-          return accumulator;
-        },
-        {} as Record<string, AssemblyReviewDecision>
-      )
-    );
-  }
+    if (!targetFrame) {
+      return;
+    }
 
-  function restoreSavedReviewChoices() {
-    setReviewDraft(
-      reviewItems.reduce(
-        (accumulator, item) => {
-          if (item.decision) {
-            accumulator[item.id] = item.decision;
-          }
-
-          return accumulator;
-        },
-        {} as Record<string, AssemblyReviewDecision>
-      )
-    );
+    setSelectedFrameId(targetFrame.id);
   }
 
   function activateGapEdit(gapKey: string) {
@@ -1287,16 +1381,7 @@ export function FrameSelectionLab({
 
   function activateScoreCrop(cropIndex: number) {
     setActiveGapKey(null);
-    setActiveScoreCropIndex(cropIndex);
-  }
-
-  function openFrameInConvertWorkspace(frameId: string | null) {
-    if (!frameId) {
-      return;
-    }
-
-    setSelectedFrameId(frameId);
-    onRequestWorkspaceMode("convert");
+    setActiveScoreCropIndex((currentCropIndex) => (currentCropIndex === cropIndex ? null : cropIndex));
   }
 
   function switchViewerMode(nextMode: ViewerMode) {
@@ -1352,194 +1437,42 @@ export function FrameSelectionLab({
   }
 
   const summaryText = project.assembledScore
-    ? `${project.assembledScore.sourceFrameCount} -> ${project.assembledScore.stitchedFrameCount}${
-        project.assemblyReview?.pendingCount ? ` / review ${project.assemblyReview.pendingCount}` : ""
-      }`
+    ? `${project.assembledScore.sourceFrameCount} -> ${project.assembledScore.stitchedFrameCount}`
     : frames.length > 0
       ? `${frames.length} frames`
       : isCapturing
       ? "capturing"
         : "ready";
-
-  const reviewSection = project.assembledScore ? (
-    <div className="section-block stack-xs">
-      <div className="row-between">
-        <div className="stack-xs">
-          <p className="section-label">Overlap Review</p>
-          <p className="muted">
-            {reviewItems.length === 0
-              ? "검수 필요 구간 없음"
-              : `${reviewItems.length}개 중 ${resolvedReviewCount}개 선택 완료 / 보류 ${unresolvedReviewCount}개`}
-          </p>
-        </div>
-        {reviewItems.length > 0 ? (
-          <div className="action-row">
-            <button className="ghost-button" type="button" onClick={applyRecommendedReviewChoices}>
-              추천값 채우기
-            </button>
-            <button
-              className="ghost-button"
-              type="button"
-              onClick={restoreSavedReviewChoices}
-              disabled={!hasUnsavedReviewChanges}
-            >
-              되돌리기
-            </button>
-            <button
-              className="primary-button"
-              type="button"
-              onClick={() => void applyReview()}
-              disabled={
-                unresolvedReviewCount > 0 ||
-                !hasUnsavedReviewChanges ||
-                isApplyingReview ||
-                isApplyingManualEdit
-              }
-            >
-              {isApplyingReview ? "반영 중" : "검수 반영"}
-            </button>
-          </div>
-        ) : null}
-      </div>
-
-      {reviewItems.length === 0 ? (
-        <div className="empty-box">자동 제거만으로 충분해서 추가 검수 없이 PNG를 내보낼 수 있습니다.</div>
-      ) : (
-        <div className="review-list">
-          {reviewItems.map((item, index) => {
-            const decision = reviewDraft[item.id];
-            const previousCropUrl = projectAssetUrl(project.id, item.previousCropRelativePath);
-            const currentCropUrl = projectAssetUrl(project.id, item.currentCropRelativePath);
-
-            return (
-              <article className="review-card stack-xs" key={item.id}>
-                <div className="row-between">
-                  <p className="section-label">검수 {index + 1}</p>
-                  <p className="muted">
-                    {formatSeconds(item.previousTimestampSec)}
-                    {" -> "}
-                    {formatSeconds(item.currentTimestampSec)}
-                  </p>
-                </div>
-                <p className="review-detail">{item.reason}</p>
-                <div className="review-meta-row">
-                  <span>절삭 후보 {formatReviewPercent(item.overlapTrimRatio)}</span>
-                  <span>유사도 {item.overlapScore.toFixed(3)}</span>
-                </div>
-                <div className="review-preview-grid">
-                  <div className={reviewFrameShellClassName}>
-                    <p className="review-frame-label">이전</p>
-                    <img className={reviewImageClassName} src={previousCropUrl} alt="Previous tab segment" />
-                  </div>
-                  <div className={reviewFrameShellClassName}>
-                    <p className="review-frame-label">현재</p>
-                    <img className={reviewImageClassName} src={currentCropUrl} alt="Current tab segment" />
-                  </div>
-                </div>
-                <div className="action-row">
-                  <button
-                    className={decision === "keep_both" ? "toggle-button is-active" : "toggle-button"}
-                    type="button"
-                    onClick={() => updateReviewDecision(item.id, "keep_both")}
-                  >
-                    둘 다 유지
-                  </button>
-                  <button
-                    className={decision === "trim_overlap" ? "toggle-button is-active" : "toggle-button"}
-                    type="button"
-                    onClick={() => updateReviewDecision(item.id, "trim_overlap")}
-                  >
-                    겹침 제거
-                  </button>
-                </div>
-              </article>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  ) : null;
-
-  const manualEditSection = project.assembledScore && editor ? (
-    <div className="section-block stack-xs">
-      <div className="row-between">
-        <div className="stack-xs">
-          <p className="section-label">Manual Edit</p>
-          <p className="muted">
-            중앙의 전체 악보에서 조각을 클릭하면 제거, 조각 사이의 `+`를 클릭하면 추가 후보를 엽니다.
-          </p>
-        </div>
-        {selectedSequenceItem || activeGap ? (
-          <button
-            className="ghost-button"
-            type="button"
-            onClick={() => {
-              setActiveScoreCropIndex(null);
-              setActiveGapKey(null);
-            }}
-          >
-            선택 해제
-          </button>
-        ) : null}
-      </div>
-
-      {selectedSequenceItem ? (
-        <div className="manual-editor-panel stack-xs">
-          <div className="row-between">
-            <div className="stack-xs">
-              <p className="section-label">선택한 조각</p>
-              <p className="muted">
-                {formatSeconds(selectedSequenceItem.timestampSec)}
-                {selectedSequenceItem.trimMode === "manual" ? " / 수동 추가 조각" : " / 현재 악보 조각"}
-              </p>
-            </div>
-          </div>
-
-          <div className="review-preview-grid">
-            <div className={reviewFrameShellClassName}>
-              <p className="review-frame-label">{formatSeconds(selectedSequenceItem.timestampSec)}</p>
-              <img
-                className={reviewImageClassName}
-                src={projectAssetUrl(project.id, selectedSequenceItem.relativePath)}
-                alt="Selected score segment"
-              />
-            </div>
-          </div>
-
-          <div className="action-row">
-            <button
-              className="ghost-button"
-              type="button"
-              onClick={() => openFrameInConvertWorkspace(selectedSequenceItem.frameId)}
-            >
-              프레임 보기
-            </button>
-            <button
-              className="primary-button"
-              type="button"
-              onClick={() => void removeCropFromSequence(selectedSequenceItem.cropIndex)}
-              disabled={isApplyingManualEdit || editor.orderedCropIndices.length <= 1}
-            >
-              제거
-            </button>
-          </div>
-        </div>
-      ) : (
-        <div className="empty-box">
-          현재 조각 {editor.sequence.length}개 / 수동 추가 {manualInsertedCount}개. 큰 악보에서 조각을 누르면 제거,
-          `+`를 누르면 추가 팝업이 바로 열립니다.
-        </div>
-      )}
-    </div>
-  ) : null;
+  const activeRoiSegmentIndex = activeRoiSegment
+    ? roiSegments.findIndex((segment) => segment.id === activeRoiSegment.id)
+    : -1;
+  const activeRoiSegmentEnd = activeRoiSegmentIndex >= 0 ? roiSegments[activeRoiSegmentIndex + 1] ?? null : null;
+  const canInsertRoiFromCurrent = Boolean(
+    roi &&
+      selectedFrame &&
+      hasSavedRoiSegments &&
+      selectedFrame.timestampSec > (activeRoiSegment?.startTimestampSec ?? -1) &&
+      !roiSegments.some((segment) => segment.startTimestampSec === selectedFrame.timestampSec)
+  );
+  const roiTimelineStatusText = activeRoiSegment
+    ? `${formatSeconds(activeRoiSegment.startTimestampSec)}부터 ${
+        activeRoiSegmentEnd ? formatSeconds(activeRoiSegmentEnd.startTimestampSec) : "끝"
+      }까지 적용`
+    : hasSavedRoiSegments
+      ? "선택한 프레임에 맞는 ROI 구간을 찾지 못했습니다."
+      : "아직 저장된 ROI 구간이 없습니다.";
 
   return (
     <section className="minimal-card stack-sm">
       {isConvertMode ? (
         <>
-          <div className="row-between">
-            <h2 className="section-title">유튜브 변환</h2>
-            <p className="status-line">{summaryText}</p>
+          <div className="workspace-subheader">
+            <div className="workspace-subheader-main">
+              <h2 className="section-title">유튜브 변환</h2>
+            </div>
+            <div className="workspace-subheader-meta">
+              <p className="section-summary-chip">{summaryText}</p>
+            </div>
           </div>
 
           <div className="section-block stack-xs">
@@ -1559,12 +1492,20 @@ export function FrameSelectionLab({
                     key={frame.id}
                     frame={frame}
                     isSelected={frame.id === selectedFrameId}
+                    isUsed={usedFrameIdSet.has(frame.id)}
+                    isError={failedAssemblyFrameIdSet.has(frame.id)}
                     imageUrl={projectAssetUrl(project.id, frame.relativePath)}
                     onSelect={() => setSelectedFrameId(frame.id)}
                   />
                 ))
               )}
             </div>
+
+            {project.assemblyFailure?.failedFrameIds.length ? (
+              <p className="error-text">
+                선택한 ROI에서 tab를 찾지 못한 프레임 {project.assemblyFailure.failedFrameIds.length}개를 빨간색으로 표시했습니다.
+              </p>
+            ) : null}
           </div>
 
           <div className="section-block stack-xs">
@@ -1572,14 +1513,39 @@ export function FrameSelectionLab({
               <button className="ghost-button" type="button" onClick={suggestBottomBand} disabled={!imageElement}>
                 자동 선택
               </button>
-              <button className="ghost-button" type="button" onClick={clearSelection} disabled={!selection}>
-                ROI 지우기
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={clearSelection}
+                disabled={!selection && !activeRoiSegment}
+              >
+                {activeRoiSegment ? "저장 ROI로 되돌리기" : "ROI 지우기"}
+              </button>
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={() => void saveRoiSegment("replace-active")}
+                disabled={!roi || isSavingRoi}
+              >
+                {isSavingRoi
+                  ? "저장 중"
+                  : hasSavedRoiSegments
+                    ? "현재 구간 ROI 저장"
+                    : "처음부터 ROI 저장"}
+              </button>
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={() => void saveRoiSegment("insert-from-current")}
+                disabled={!canInsertRoiFromCurrent || isSavingRoi}
+              >
+                현재 프레임부터 새 ROI
               </button>
               <button
                 className="primary-button"
                 type="button"
                 onClick={() => void generateFullScore()}
-                disabled={!roi || isAssembling || isApplyingReview || isApplyingManualEdit}
+                disabled={!canGenerateFullScore || isAssembling || isApplyingManualEdit}
               >
                 {isAssembling ? "생성 중" : "전체 Tab 생성"}
               </button>
@@ -1594,6 +1560,77 @@ export function FrameSelectionLab({
                 onPointerUp={handlePointerUp}
               />
             </div>
+          </div>
+
+          <div className="section-block stack-xs">
+            <div className="row-between">
+              <div className="stack-xs">
+                <p className="section-label">ROI Timeline</p>
+                <p className="muted">
+                  {selectedFrame ? `${formatSeconds(selectedFrame.timestampSec)} 프레임 기준 · ` : ""}
+                  {roiTimelineStatusText}
+                </p>
+              </div>
+              <p className="muted">구간 {roiSegments.length}</p>
+            </div>
+
+            {hasUnsavedRoiChanges ? (
+              <div className="status-box">현재 ROI 변경사항이 저장되지 않았습니다. 저장 후 전체 Tab를 생성하세요.</div>
+            ) : null}
+
+            {roiSegments.length > 0 ? (
+              <div className="roi-segment-list">
+                {roiSegments.map((segment, index) => {
+                  const nextSegment = roiSegments[index + 1] ?? null;
+                  const isActiveSegment = segment.id === activeRoiSegment?.id;
+
+                  return (
+                    <article
+                      className={isActiveSegment ? "roi-segment-card is-active" : "roi-segment-card"}
+                      key={segment.id}
+                    >
+                      <div className="roi-segment-main stack-xs">
+                        <div className="row-between">
+                          <p className="section-label">
+                            {formatSeconds(segment.startTimestampSec)}부터
+                            {" · "}
+                            {nextSegment ? formatSeconds(nextSegment.startTimestampSec) : "끝"}
+                          </p>
+                          <p className="muted">{isActiveSegment ? "현재 적용중" : ""}</p>
+                        </div>
+                        <p className="muted">
+                          {formatRoiSelectionModeLabel(segment.selectionMode)}
+                          {segment.startFrameId ? ` · ${segment.startFrameId}` : ""}
+                        </p>
+                      </div>
+                      <div className="action-row">
+                        <button
+                          className="ghost-button"
+                          type="button"
+                          onClick={() => jumpToRoiSegment(segment)}
+                        >
+                          이 시점 보기
+                        </button>
+                        {index > 0 ? (
+                          <button
+                            className="ghost-button"
+                            type="button"
+                            onClick={() => void deleteRoiSegment(segment.id)}
+                            disabled={deletingRoiSegmentId === segment.id}
+                          >
+                            {deletingRoiSegmentId === segment.id ? "삭제 중" : "구간 삭제"}
+                          </button>
+                        ) : null}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="empty-box">
+                첫 ROI를 저장하면 그 구간이 영상 시작부터 적용됩니다. 이후 다른 프레임에서 `현재 프레임부터 새 ROI`를 누르면 그 시점부터 새로운 ROI가 이어집니다.
+              </div>
+            )}
           </div>
 
           {statusMessage ? <div className="status-box">{statusMessage}</div> : null}
@@ -1688,9 +1725,6 @@ export function FrameSelectionLab({
                       </span>
                     </button>
                   </div>
-                  {isExportLocked ? (
-                    <p className="muted">의심 구간 검수를 반영한 뒤 PNG를 내보낼 수 있습니다.</p>
-                  ) : null}
                 </>
               ) : (
                 <div className={scoreShellClassName}>
@@ -1702,21 +1736,18 @@ export function FrameSelectionLab({
         </>
       ) : (
         <>
-          <div className="row-between">
-            <div className="stack-xs">
+          <div className="workspace-subheader">
+            <div className="workspace-subheader-main">
               <h2 className="section-title">악보 수정</h2>
-              <p className="muted">
-                전체 악보 레이아웃을 크게 보면서 검수와 수동 추가/삭제를 빠르게 진행합니다.
-              </p>
             </div>
-            <div className="action-row">
+            <div className="workspace-subheader-meta">
+              <p className="section-summary-chip">{summaryText}</p>
               <button className="ghost-button" type="button" onClick={() => onRequestWorkspaceMode("convert")}>
                 <span className="button-with-icon">
                   <Film className="button-icon" aria-hidden="true" />
-                  <span className="button-label">유튜브 변환 탭</span>
+                  <span className="button-label">변환 보기</span>
                 </span>
               </button>
-              <p className="status-line">{summaryText}</p>
             </div>
           </div>
 
@@ -1790,25 +1821,42 @@ export function FrameSelectionLab({
                   <img className={assembledImageClassName} src={assembledScoreUrl} alt="Assembled guitar tab score" />
                   <div className="score-editor-overlay">
                     {scoreOverlayLayout.segments.map((region) => (
-                      <button
+                      <div
                         key={`segment-${region.cropIndex}`}
                         className={
                           activeScoreCropIndex === region.cropIndex
-                            ? "score-region-button is-active"
-                            : "score-region-button"
+                            ? "score-region-shell is-active"
+                            : "score-region-shell"
                         }
-                        type="button"
                         style={{
                           top: `${region.topPercent}%`,
                           height: `${region.heightPercent}%`,
                           left: `${region.leftPercent}%`,
                           width: `${region.widthPercent}%`
                         }}
-                        onClick={() => activateScoreCrop(region.cropIndex)}
-                        aria-label={`${formatSeconds(region.timestampSec)} 조각 선택`}
                       >
-                        <span className="score-region-label">{formatSeconds(region.timestampSec)}</span>
-                      </button>
+                        <button
+                          className="score-region-hitbox"
+                          type="button"
+                          onClick={() => activateScoreCrop(region.cropIndex)}
+                          aria-label={`${formatSeconds(region.timestampSec)} 조각 선택`}
+                        >
+                          <span className="score-region-label">{formatSeconds(region.timestampSec)}</span>
+                        </button>
+                        <button
+                          className="score-region-delete"
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void removeCropFromSequence(region.cropIndex);
+                          }}
+                          aria-label={`${formatSeconds(region.timestampSec)} 조각 삭제`}
+                          title="조각 삭제"
+                          disabled={isApplyingManualEdit || !canRemoveSequenceCrop}
+                        >
+                          <X className="button-icon" aria-hidden="true" />
+                        </button>
+                      </div>
                     ))}
                     {scoreOverlayLayout.gaps.map((gapRegion) => (
                       <button
@@ -1833,17 +1881,12 @@ export function FrameSelectionLab({
 
               <p className="muted">조각 클릭: 제거 후보 선택 / `+` 클릭: 이 위치에 추가할 후보 열기</p>
 
-              {isExportLocked ? (
-                <p className="muted">의심 구간 검수를 반영한 뒤 PNG를 내보낼 수 있습니다.</p>
-              ) : null}
             </div>
           ) : (
             <div className="empty-box">유튜브 변환 탭에서 먼저 전체 Tab를 생성하세요.</div>
           )}
 
           {statusMessage ? <div className="status-box">{statusMessage}</div> : null}
-          {reviewSection}
-          {manualEditSection}
         </>
       )}
 
@@ -2342,20 +2385,29 @@ export function FrameSelectionLab({
 function FrameThumbnail({
   frame,
   isSelected,
+  isUsed,
+  isError,
   imageUrl,
   onSelect
 }: {
   frame: ProjectFrameAsset;
   isSelected: boolean;
+  isUsed: boolean;
+  isError: boolean;
   imageUrl: string;
   onSelect: () => void;
 }) {
+  const className = [
+    "thumbnail-card",
+    isUsed ? "is-used" : "",
+    isError ? "is-error" : "",
+    isSelected ? "is-selected" : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
-    <button
-      className={isSelected ? "thumbnail-card is-selected" : "thumbnail-card"}
-      type="button"
-      onClick={onSelect}
-    >
+    <button className={className} type="button" onClick={onSelect}>
       <img className="thumbnail-image" src={imageUrl} alt={`Frame at ${formatSeconds(frame.timestampSec)}`} />
       <span className="thumbnail-time">{formatSeconds(frame.timestampSec)}</span>
     </button>

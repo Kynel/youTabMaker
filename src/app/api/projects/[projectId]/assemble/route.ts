@@ -2,10 +2,11 @@ import { NextResponse } from "next/server";
 
 import { createProjectProgressReporter } from "@/lib/processing";
 import { applyRuntimeToProject } from "@/lib/project";
+import { createSavedRoiTimeline, getProjectRoiSegments } from "@/lib/roi";
 import { inspectRuntime } from "@/lib/runtime";
 import { loadDraftProject, updateDraftProject } from "@/lib/storage";
-import { assembleProjectScore } from "@/lib/video-pipeline";
-import type { RoiSelection, SavedRoi } from "@/lib/types";
+import { assembleProjectScore, TabCropDetectionError } from "@/lib/video-pipeline";
+import type { RoiSelection, SavedRoi, SavedRoiSegment } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -47,10 +48,8 @@ export async function POST(
       roi?: RoiSelection;
       selectionMode?: SavedRoi["selectionMode"];
     } | null;
-
-    if (!isValidRoiSelection(payload?.roi)) {
-      return NextResponse.json({ error: "A valid ROI payload is required." }, { status: 400 });
-    }
+    const currentSegments = getProjectRoiSegments(project);
+    let roiSegments = currentSegments;
 
     if (!project.frames || project.frames.length === 0) {
       return NextResponse.json(
@@ -59,12 +58,39 @@ export async function POST(
       );
     }
 
+    if (roiSegments.length === 0) {
+      if (!isValidRoiSelection(payload?.roi)) {
+        return NextResponse.json(
+          { error: "Save at least one ROI segment before generating the full score." },
+          { status: 400 }
+        );
+      }
+
+      const savedAt = new Date().toISOString();
+      roiSegments = [
+        {
+          id: "initial-segment",
+          startTimestampSec: 0,
+          startFrameId: project.frames[0]?.id ?? null,
+          selection: payload.roi,
+          selectionMode:
+            payload.selectionMode === "bottom-band-suggestion" ? "bottom-band-suggestion" : "manual",
+          savedAt
+        }
+      ] satisfies SavedRoiSegment[];
+    }
+
+    const roiTimeline = createSavedRoiTimeline(roiSegments);
     const savedRoi: SavedRoi = {
-      selection: payload.roi,
-      selectionMode:
-        payload.selectionMode === "bottom-band-suggestion" ? "bottom-band-suggestion" : "manual",
-      savedAt: new Date().toISOString()
+      selection: roiTimeline.segments[0].selection,
+      selectionMode: roiTimeline.segments[0].selectionMode,
+      savedAt: roiTimeline.segments[0].savedAt
     };
+
+    await updateDraftProject(projectId, (currentProject) => ({
+      ...currentProject,
+      assemblyFailure: undefined
+    }));
 
     await progress.report({
       stage: "preparing",
@@ -76,7 +102,7 @@ export async function POST(
     const { assembledScore, assemblyEditor, assemblyReview } = await assembleProjectScore(
       projectId,
       project.frames,
-      payload.roi,
+      roiTimeline.segments,
       progress.report
     );
     const updatedProject = await updateDraftProject(projectId, (currentProject) =>
@@ -84,10 +110,12 @@ export async function POST(
         {
           ...currentProject,
           roi: savedRoi,
+          roiTimeline,
           assembledScore,
           assemblyEditor,
           assemblyManualEdit: undefined,
           assemblyReview,
+          assemblyFailure: undefined,
           processing: undefined
         },
         inspectRuntime()
@@ -96,11 +124,28 @@ export async function POST(
 
     return NextResponse.json({ project: updatedProject });
   } catch (error) {
-    await progress.fail(error instanceof Error ? error.message : "Failed to assemble the full tab score.");
+    const errorMessage = error instanceof Error ? error.message : "Failed to assemble the full tab score.";
+    let failedProject: ReturnType<typeof applyRuntimeToProject> | undefined;
+
+    if (error instanceof TabCropDetectionError) {
+      const updatedProject = await updateDraftProject(projectId, (currentProject) => ({
+        ...currentProject,
+        assemblyFailure: {
+          generatedAt: new Date().toISOString(),
+          reason: error.message,
+          failedFrameIds: error.failedFrameIds
+        }
+      }));
+      failedProject = applyRuntimeToProject(updatedProject, inspectRuntime());
+    }
+
+    await progress.fail(errorMessage);
+    await progress.clear();
 
     return NextResponse.json(
       {
-        error: error instanceof Error ? error.message : "Failed to assemble the full tab score."
+        error: errorMessage,
+        project: failedProject
       },
       { status: 500 }
     );

@@ -100,6 +100,7 @@ export async function POST(
     return NextResponse.json({ project: updatedProject });
   } catch (error) {
     await progress.fail(error instanceof Error ? error.message : "Failed to apply the manual score edit.");
+    await progress.clear();
 
     return NextResponse.json(
       {

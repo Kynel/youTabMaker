@@ -54,6 +54,7 @@ export async function POST(
           assemblyEditor: undefined,
           assemblyManualEdit: undefined,
           assemblyReview: undefined,
+          assemblyFailure: undefined,
           processing: undefined
         },
         inspectRuntime()
@@ -63,6 +64,7 @@ export async function POST(
     return NextResponse.json({ project: updatedProject });
   } catch (error) {
     await progress.fail(error instanceof Error ? error.message : "Failed to capture frames from the YouTube video.");
+    await progress.clear();
 
     return NextResponse.json(
       {

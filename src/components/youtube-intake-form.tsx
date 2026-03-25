@@ -62,15 +62,13 @@ export function YouTubeIntakeForm({
       } | null;
 
       if (!response.ok || !payload?.project) {
-        throw new Error(payload?.error ?? "Unable to create a draft project.");
+        throw new Error(payload?.error ?? "새 작업을 만들지 못했습니다.");
       }
 
       onProjectCreated(payload.project);
     } catch (submissionError) {
       setError(
-        submissionError instanceof Error
-          ? submissionError.message
-          : "Unexpected error while creating a draft project."
+        submissionError instanceof Error ? submissionError.message : "새 작업을 만들지 못했습니다."
       );
     } finally {
       setIsSubmitting(false);
@@ -81,8 +79,6 @@ export function YouTubeIntakeForm({
     ? "이전 작업 불러오는 중"
     : isCapturing
       ? "프레임 추출 중"
-      : project?.assemblyReview?.pendingCount
-        ? `검수 ${project.assemblyReview.pendingCount}`
       : project?.assembledScore
         ? `완성 ${project.assembledScore.stitchedFrameCount}`
         : project?.frames?.length
@@ -96,16 +92,11 @@ export function YouTubeIntakeForm({
           <h1 className="page-title">YouTabMaker</h1>
           <p className="status-line">{statusText}</p>
         </div>
-      ) : (
-        <div className="row-between">
-          <p className="section-label">YouTube URL</p>
-          <p className="status-line">{statusText}</p>
-        </div>
-      )}
+      ) : null}
 
       <form className="inline-form" onSubmit={handleSubmit}>
         <label className="grow" htmlFor="youtube-url">
-          <span className="field-label">YouTube URL</span>
+          <span className="field-label">영상 링크</span>
           <input
             id="youtube-url"
             className="text-input"

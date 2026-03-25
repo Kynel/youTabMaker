@@ -73,7 +73,16 @@
 - scroll mode now has `- / +` zoom controls for the stitched score, and low auto-scroll speeds use an accumulated scroll position so they keep moving smoothly instead of stalling
 - fullscreen mode can now hide the top toolbar entirely and restore it with a small floating action, so the score can use nearly the whole viewport height
 - the viewer and main workbench actions now use `lucide-react` icons where the action is visually obvious, and scroll-view zoom now spans a wider `40% ~ 320%` range
+- in score-edit mode, deleting a stitched segment now happens from a hover `X` button at the top-right of the segment instead of relying on the lower detail panel
+- the separate `Manual Edit` panel under the score was removed, leaving score editing to happen directly on the large stitched score with in-score `X` and `+` controls
 - edit mode now keeps each stitched segment's timestamp visible at the top-left of the large score overlay
+- draft projects now expose `updatedAt`, a saved-project summary API, and a convert-tab saved-project list so local work can be resumed from disk
+- ROI data is now stored as a timeline of saved segments instead of a single global ROI, so a new ROI can start from any chosen frame timestamp and apply only forward until the next saved segment
+- full-score assembly now resolves the active ROI segment for each 1-second frame by timestamp before cropping, so one video can stitch multiple ROI regions across different sections
+- the convert tab now includes an ROI timeline panel with per-segment save, insert-from-current, delete-later-segment, and jump-to-segment controls
+- the old overlap-review UI has now been removed from the workbench, leaving score editing centered on direct add/remove actions in the stitched score
+- the captured-frame strip now highlights frames that are currently used in the assembled score
+- switching from `악보 수정` back to `유튜브 변환` now re-renders the source canvas and ROI preview correctly instead of leaving those panels black
 - project documentation and agent handoff docs
 
 ### Verification
@@ -99,6 +108,16 @@
 - Confirmed the initial Next.js app builds successfully
 - Initialized a local Git repository
 - Re-verified `GET /` returns `200 OK` after splitting the workbench into convert/edit tabs and enlarging the edit-mode score view
+- Verified `GET /api/projects` returns saved local draft summaries for the new saved-project list
+- Re-ran `npm run typecheck` after adding ROI timelines and saved-project loading
+- Re-ran `npm run build` after clearing a corrupted `.next` cache caused by Next.js dev/build artifacts
+- Re-verified `GET /` returns `200 OK` after the saved-project and ROI-timeline work
+- Re-ran `npm run typecheck` and `npm run build` after removing the review UI, adding used-frame highlighting, and fixing convert-tab redraws
+- Re-ran `npm run build` and `npm run typecheck` after splitting saved-project loading into a dedicated tab, adding project rename support, and cleaning up the convert-tab header/input copy
+- Re-verified local `GET /` returns `200 OK` after the saved-project/workspace tab UI cleanup
+- Re-ran `npm run build` and `npm run typecheck` after fixing the stuck failure overlay and adding red failed-frame highlighting for ROI crop-detection errors
+- Re-ran `npm run build` and `npm run typecheck` after fixing ROI-bound clamping and replacing the overly coarse `16x16` tab-detection heuristic that caused false `No tab-like crops` failures on segmented ROI projects
+- Re-ran `npm run build`, `npm run typecheck`, and local `GET /` after simplifying the top workspace header, reducing the edit/convert subheaders, and making the main navigation read more like a compact tab bar
 
 ### Remaining Work
 
@@ -108,3 +127,5 @@
 - improve review-candidate detection so more real repeated-bar edge cases surface automatically
 - improve omission-gap detection so more real-world dropped systems are flagged automatically without user inspection
 - improve ROI auto-detection and repeated-section handling
+- consider a richer visual timeline for ROI segments if users start managing many ROI changes in long videos
+- add delete/archive controls for saved local projects once the library tab workflow settles

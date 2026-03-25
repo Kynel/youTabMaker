@@ -4,6 +4,7 @@ import path from "node:path";
 
 import sharp from "sharp";
 
+import { findActiveRoiSegment } from "@/lib/roi";
 import {
   ensureProjectSubdirectories,
   getProjectAssetAbsolutePath,
@@ -23,10 +24,14 @@ import type {
   AssemblyTrimMode,
   ProjectFrameAsset,
   RoiSelection,
+  SavedRoiSegment,
   VideoAsset
 } from "@/lib/types";
 
-const MIN_TAB_DARK_RATIO = 0.02;
+const SIGNATURE_HASH_SIZE = 16;
+const SIGNATURE_DARK_RATIO_SIZE = 64;
+const SIGNATURE_DARK_THRESHOLD = 235;
+const MIN_TAB_DARK_RATIO = 0.03;
 const RECENT_DUPLICATE_WINDOW = 6;
 const DUPLICATE_HASH_DISTANCE = 12;
 const NORMALIZATION_WIDTH_QUANTILE = 0.75;
@@ -109,6 +114,7 @@ interface AssemblyManifest {
   sourceFrameCount: number;
   normalizationWidth: number;
   roi: RoiSelection;
+  roiTimeline: SavedRoiSegment[];
   crops: CropManifestEntry[];
   autoOrderedCropIndices?: number[];
   transitions: TransitionManifestEntry[];
@@ -133,6 +139,48 @@ interface PipelineProgressUpdate {
   current?: number;
   total?: number;
   unit?: string;
+}
+
+export class TabCropDetectionError extends Error {
+  failedFrameIds: string[];
+
+  constructor(message: string, failedFrameIds: string[]) {
+    super(message);
+    this.name = "TabCropDetectionError";
+    this.failedFrameIds = failedFrameIds;
+  }
+}
+
+function resolveRoiBounds(selection: RoiSelection, frameWidth: number, frameHeight: number) {
+  const normalizedLeft = Math.min(1, Math.max(0, selection.normalized?.x ?? selection.x / Math.max(1, frameWidth)));
+  const normalizedTop = Math.min(1, Math.max(0, selection.normalized?.y ?? selection.y / Math.max(1, frameHeight)));
+  const normalizedRight = Math.min(
+    1,
+    Math.max(
+      normalizedLeft,
+      (selection.normalized?.x ?? selection.x / Math.max(1, frameWidth)) +
+        (selection.normalized?.width ?? selection.width / Math.max(1, frameWidth))
+    )
+  );
+  const normalizedBottom = Math.min(
+    1,
+    Math.max(
+      normalizedTop,
+      (selection.normalized?.y ?? selection.y / Math.max(1, frameHeight)) +
+        (selection.normalized?.height ?? selection.height / Math.max(1, frameHeight))
+    )
+  );
+  const left = Math.max(0, Math.min(frameWidth - 1, Math.round(normalizedLeft * frameWidth)));
+  const top = Math.max(0, Math.min(frameHeight - 1, Math.round(normalizedTop * frameHeight)));
+  const right = Math.max(left + 1, Math.min(frameWidth, Math.round(normalizedRight * frameWidth)));
+  const bottom = Math.max(top + 1, Math.min(frameHeight, Math.round(normalizedBottom * frameHeight)));
+
+  return {
+    left,
+    top,
+    width: Math.max(1, right - left),
+    height: Math.max(1, bottom - top)
+  };
 }
 
 interface ToolHooks {
@@ -415,7 +463,7 @@ async function computeCropSignature(buffer: Buffer) {
   const { data } = await sharp(buffer)
     .flatten({ background: "#ffffff" })
     .greyscale()
-    .resize(16, 16, {
+    .resize(SIGNATURE_HASH_SIZE, SIGNATURE_HASH_SIZE, {
       fit: "fill"
     })
     .raw()
@@ -423,7 +471,16 @@ async function computeCropSignature(buffer: Buffer) {
 
   const average = data.reduce((sum, value) => sum + value, 0) / data.length;
   const hash = Array.from(data, (value) => (value >= average ? "1" : "0")).join("");
-  const darkRatio = data.filter((value) => value < 220).length / data.length;
+  const { data: darkRatioData } = await sharp(buffer)
+    .flatten({ background: "#ffffff" })
+    .greyscale()
+    .resize(SIGNATURE_DARK_RATIO_SIZE, SIGNATURE_DARK_RATIO_SIZE, {
+      fit: "fill"
+    })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const darkRatio =
+    darkRatioData.filter((value) => value < SIGNATURE_DARK_THRESHOLD).length / darkRatioData.length;
 
   return {
     hash,
@@ -854,6 +911,7 @@ async function renderAssembledScoreFromManifest(
         stitchedFrameCount: stitchedCrops.length,
         normalizationWidth: manifest.normalizationWidth,
         roi: manifest.roi,
+        roiTimeline: manifest.roiTimeline,
         review: {
           totalCount: review.totalCount,
           pendingCount: review.pendingCount,
@@ -948,10 +1006,16 @@ export async function applyAssemblyManualEdits(
 export async function assembleProjectScore(
   projectId: string,
   frames: ProjectFrameAsset[],
-  roi: RoiSelection,
+  roiTimeline: SavedRoiSegment[],
   onProgress?: PipelineProgressReporter
 ) {
   await ensureProjectSubdirectories(projectId);
+
+  const initialRoi = roiTimeline[0]?.selection;
+
+  if (!initialRoi) {
+    throw new Error("No ROI segments are available for assembly.");
+  }
 
   const outputDirectory = getProjectOutputDirectory(projectId);
   const normalizedCropsDirectory = path.join(outputDirectory, "normalized-crops");
@@ -962,11 +1026,18 @@ export async function assembleProjectScore(
 
   for (const [frameIndex, frame] of frames.entries()) {
     const frameAbsolutePath = getProjectAssetAbsolutePath(projectId, frame.relativePath);
+    const activeRoiSegment = findActiveRoiSegment(roiTimeline, frame.timestampSec);
+    const activeRoi = activeRoiSegment?.selection ?? roiTimeline[0]?.selection;
 
-    const cropLeft = Math.max(0, roi.x);
-    const cropTop = Math.max(0, roi.y);
-    const cropWidth = Math.max(1, Math.min(roi.width, frame.width - cropLeft));
-    const cropHeight = Math.max(1, Math.min(roi.height, frame.height - cropTop));
+    if (!activeRoi) {
+      continue;
+    }
+
+    const resolvedRoi = resolveRoiBounds(activeRoi, frame.width, frame.height);
+    const cropLeft = resolvedRoi.left;
+    const cropTop = resolvedRoi.top;
+    const cropWidth = resolvedRoi.width;
+    const cropHeight = resolvedRoi.height;
 
     if (cropWidth <= 1 || cropHeight <= 1) {
       continue;
@@ -1029,7 +1100,10 @@ export async function assembleProjectScore(
   }
 
   if (autoOrderedCropIndices.length === 0) {
-    throw new Error("No tab-like crops were detected in the selected ROI. Try selecting a different ROI.");
+    throw new TabCropDetectionError(
+      "No tab-like crops were detected in the selected ROI. Try selecting a different ROI.",
+      preparedCrops.map((crop) => crop.frame.id)
+    );
   }
 
   const targetWidth = selectNormalizationWidth(preparedCrops.map((crop) => crop.width));
@@ -1137,7 +1211,8 @@ export async function assembleProjectScore(
     generatedAt: new Date().toISOString(),
     sourceFrameCount: frames.length,
     normalizationWidth: targetWidth,
-    roi,
+    roi: initialRoi,
+    roiTimeline,
     crops: manifestCrops,
     autoOrderedCropIndices,
     transitions
