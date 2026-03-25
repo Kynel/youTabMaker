@@ -51,6 +51,13 @@ The repository was empty at the start of this session. It now contains a web-fir
 - the old overlap-review panel is no longer exposed in the UI; score correction is now centered on direct in-score add/remove editing
 - the captured-frame strip now highlights frames that are part of the current stitched score, making it easier to see which 1-second captures are already in use
 - switching from `악보 수정` back to `유튜브 변환` now forces the source canvas and ROI preview to redraw, fixing the earlier black-panel issue on return
+- the top workspace shell now reads more like a production product header: brand lockup, compact status cards, a current-project summary card, and full-width captioned tabs instead of generic toolbar buttons
+- the saved-project library now supports delete alongside rename/load, and deleting the currently loaded draft clears the active workspace state and local last-project pointer
+- the UI chrome was lightened further after the production-header pass: helper panels now rely more on spacing and muted surfaces, while hard 1px borders are reserved for outer shells and primary interactive areas
+- the workspace tabs were refined again so they read as one connected tab strip with a single bottom baseline; desktop tab overflow scrolling was removed by using a fixed three-column layout and mobile still collapses to one-per-row
+- the edit workspace header was refactored into a more production-style control surface: a labeled score-editor header, compact summary chip, grouped settings for background/display, and a dedicated export action cluster above the score canvas
+- the fullscreen viewer toolbar was also upgraded into a more production-like control surface with a top status/action row and a separate controls row for mode, zoom, and playback/page navigation
+- the fullscreen viewer speed control is now a custom slider component rather than the browser-default range input, and when the viewer toolbar is hidden in scroll mode the user can tap/click the score once to start or stop auto-scroll
 - documentation for product scope, architecture, and implementation phases
 
 ## Important Product Assumptions
@@ -87,6 +94,7 @@ The repository was empty at the start of this session. It now contains a web-fir
 - `npm run dev -- --hostname 127.0.0.1 --port 3000`
 - local `GET /` and `HEAD /` smoke test against `http://127.0.0.1:3000`
 - local `GET /api/projects`
+- local `DELETE /api/projects/:id` against a temporary draft created through `POST /api/intake`
 - `POST /api/projects/:id/capture`
 - `POST /api/projects/:id/assemble`
 - `POST /api/projects/:id/manual-edit`
@@ -112,4 +120,5 @@ The repository was empty at the start of this session. It now contains a web-fir
 - Download progress from `yt-dlp` is stage-based and best-effort, while frame extraction and score assembly have more granular progress updates.
 - The convert workspace now removes the duplicate top-level YouTube URL heading and relies on the main workspace header plus a single `영상 링크` field label.
 - The top navigation is now a true tab strip (`저장된 작업` / `유튜브 변환` / `악보 수정`) rather than a row of generic buttons, so future additions should preserve that visual model.
+- The workspace header is no longer just a stripped-down debug shell; it now intentionally uses a product-style information hierarchy. Future tweaks should preserve the current separation between brand, current project, status cards, and tabs rather than collapsing them back into one noisy row.
 - If the dev server starts throwing `Cannot find module './331.js'`-style errors after repeated build/dev cycles, clear `.next` or restart `npm run dev` before assuming the page code is broken.

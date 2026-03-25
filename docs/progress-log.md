@@ -83,6 +83,13 @@
 - the old overlap-review UI has now been removed from the workbench, leaving score editing centered on direct add/remove actions in the stitched score
 - the captured-frame strip now highlights frames that are currently used in the assembled score
 - switching from `악보 수정` back to `유튜브 변환` now re-renders the source canvas and ROI preview correctly instead of leaving those panels black
+- the top workspace chrome now uses a more product-like header with compact status cards, a dedicated current-project summary card, and true full-width navigation tabs with captions
+- the saved-project library now exposes inline delete controls in addition to rename/load, and deleting the currently loaded draft clears the active workspace pointer cleanly
+- the workspace chrome and inner panels now use fewer borders and lighter gray surfaces, so the page reads less like nested wireframes and more like a finished product UI
+- the top workspace tabs now render as a connected tab strip with a shared bottom rule instead of three boxed buttons, and desktop overflow scroll was removed by switching the strip to a fixed three-column layout
+- the score-edit workspace now uses a structured editor header and grouped control bar, separating summary, view settings, display mode, and export actions so the edit area reads like a production workbench instead of a loose button row
+- the fullscreen score viewer toolbar now uses a product-style two-row control surface, separating viewer status, global actions, mode switching, zoom, and playback/page navigation into clearer groups
+- the fullscreen viewer now uses a custom-built monochrome speed slider instead of the browser-default range input, and hidden-toolbar scroll mode can toggle auto-scroll with a single tap/click on the score itself
 - project documentation and agent handoff docs
 
 ### Verification
@@ -118,6 +125,11 @@
 - Re-ran `npm run build` and `npm run typecheck` after fixing the stuck failure overlay and adding red failed-frame highlighting for ROI crop-detection errors
 - Re-ran `npm run build` and `npm run typecheck` after fixing ROI-bound clamping and replacing the overly coarse `16x16` tab-detection heuristic that caused false `No tab-like crops` failures on segmented ROI projects
 - Re-ran `npm run build`, `npm run typecheck`, and local `GET /` after simplifying the top workspace header, reducing the edit/convert subheaders, and making the main navigation read more like a compact tab bar
+- Re-ran a clean `npm run build` after clearing `.next` to verify the workspace-header/library delete changes against a fresh Next build
+- Re-ran `npm run typecheck` after the production-style workspace header/tab redesign and saved-project delete flow
+- Verified local `DELETE /api/projects/:id` by creating a temporary intake draft and deleting it immediately
+- Captured local browser screenshots with Playwright CLI to visually check the redesigned workspace header/tab presentation
+- Captured an additional Playwright screenshot after reducing border density and panel chrome to verify the lighter visual treatment
 
 ### Remaining Work
 
@@ -128,4 +140,3 @@
 - improve omission-gap detection so more real-world dropped systems are flagged automatically without user inspection
 - improve ROI auto-detection and repeated-section handling
 - consider a richer visual timeline for ROI segments if users start managing many ROI changes in long videos
-- add delete/archive controls for saved local projects once the library tab workflow settles

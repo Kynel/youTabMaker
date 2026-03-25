@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Film, FolderOpen, Pencil, RefreshCw } from "lucide-react";
+import { Film, FolderOpen, Pencil, RefreshCw, Trash2 } from "lucide-react";
 
 import { FrameSelectionLab } from "@/components/frame-selection-lab";
 import { YouTubeIntakeForm } from "@/components/youtube-intake-form";
@@ -63,6 +63,7 @@ export function TabWorkbench() {
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [projectTitleDraft, setProjectTitleDraft] = useState("");
   const [savingProjectTitleId, setSavingProjectTitleId] = useState<string | null>(null);
+  const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
   const [resetVersion, setResetVersion] = useState(0);
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("convert");
   const captureRequestIdRef = useRef(0);
@@ -235,6 +236,56 @@ export function TabWorkbench() {
     setProjectTitleDraft("");
   }
 
+  async function deleteProject(projectId: string) {
+    const targetProject = savedProjects.find((savedProject) => savedProject.id === projectId);
+
+    if (
+      !window.confirm(
+        `저장된 작업 "${targetProject?.title ?? "이 작업"}"을 삭제할까요?\n캡처 프레임과 생성된 악보도 함께 삭제됩니다.`
+      )
+    ) {
+      return;
+    }
+
+    setDeletingProjectId(projectId);
+    setSavedProjectsError(null);
+
+    try {
+      const response = await fetch(`/api/projects/${projectId}`, {
+        method: "DELETE"
+      });
+      const payload = (await response.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+
+      if (!response.ok || !payload?.ok) {
+        throw new Error(payload?.error ?? "저장된 작업을 삭제하지 못했습니다.");
+      }
+
+      if (editingProjectId === projectId) {
+        closeRenameEditor();
+      }
+
+      setSavedProjects((currentProjects) =>
+        currentProjects.filter((savedProject) => savedProject.id !== projectId)
+      );
+
+      if (project?.id === projectId) {
+        captureRequestIdRef.current += 1;
+        setProject(null);
+        setCaptureError(null);
+        setIsCapturing(false);
+        setResetVersion((current) => current + 1);
+        setWorkspaceMode("library");
+        window.localStorage.removeItem(LAST_PROJECT_STORAGE_KEY);
+      }
+
+      void refreshSavedProjects();
+    } catch (error) {
+      setSavedProjectsError(error instanceof Error ? error.message : "저장된 작업을 삭제하지 못했습니다.");
+    } finally {
+      setDeletingProjectId((currentProjectId) => (currentProjectId === projectId ? null : currentProjectId));
+    }
+  }
+
   useEffect(() => {
     async function restoreProject() {
       const lastProjectId = window.localStorage.getItem(LAST_PROJECT_STORAGE_KEY);
@@ -290,82 +341,116 @@ export function TabWorkbench() {
   }, [project?.assembledScore, workspaceMode]);
 
   const statusText = isRestoring
-    ? "이전 작업 불러오는 중"
+    ? "복원 중"
     : isCapturing
-      ? "프레임 추출 중"
+      ? "캡처 중"
       : project?.assembledScore
-        ? `완성 ${project.assembledScore.stitchedFrameCount}`
+        ? "악보 완료"
         : project?.frames?.length
-          ? `프레임 ${project.frames.length}`
-          : "대기";
+          ? "ROI 점검"
+          : "새 작업";
   const statusMetricText = project?.assembledScore
     ? `${project.assembledScore.sourceFrameCount} -> ${project.assembledScore.stitchedFrameCount}`
     : project?.frames?.length
       ? `${project.frames.length} frames`
       : "준비";
+  const workspaceDescription = project?.normalizedUrl
+    ? project.normalizedUrl
+    : "저장된 작업을 열거나 YouTube 링크로 새 작업을 시작하세요.";
+  const currentProjectSummary = project?.assembledScore
+    ? `악보 ${project.assembledScore.stitchedFrameCount}조각`
+    : project?.frames?.length
+      ? `캡처 ${project.frames.length}개`
+      : "링크 입력 대기";
+  const workspaceTabs = [
+    {
+      id: "library",
+      label: "저장된 작업",
+      caption: "불러오기 · 정리",
+      icon: FolderOpen,
+      disabled: false
+    },
+    {
+      id: "convert",
+      label: "유튜브 변환",
+      caption: "캡처 · ROI",
+      icon: Film,
+      disabled: false
+    },
+    {
+      id: "edit",
+      label: "악보 수정",
+      caption: "조각 편집 · 보기",
+      icon: Pencil,
+      disabled: !project?.assembledScore
+    }
+  ] satisfies Array<{
+    id: WorkspaceMode;
+    label: string;
+    caption: string;
+    icon: typeof FolderOpen;
+    disabled: boolean;
+  }>;
 
   return (
     <section className="workspace-grid">
-      <section className="minimal-card stack-sm">
-        <div className="page-header workspace-header">
-          <div className="workspace-title-block">
-            <h1 className="page-title">YouTabMaker</h1>
-            <div className="workspace-project-line">
-              <span className="workspace-project-prefix">PROJECT</span>
-              <p className="workspace-current-name">{project?.title ?? "새 작업"}</p>
+      <section className="minimal-card workspace-shell stack-sm">
+        <div className="workspace-header">
+          <div className="workspace-brand-block stack-xs">
+            <p className="workspace-eyebrow">YouTube Guitar Tab Workspace</p>
+            <h1 className="page-title workspace-brand-title">YouTabMaker</h1>
+          </div>
+
+          <div className="workspace-status-row">
+            <div className="workspace-status-card is-dark">
+              <p className="workspace-status-label">상태</p>
+              <p className="workspace-status-value">{statusText}</p>
+            </div>
+            <div className="workspace-status-card">
+              <p className="workspace-status-label">요약</p>
+              <p className="workspace-status-value">{statusMetricText}</p>
             </div>
           </div>
-          <div className="workspace-status-row">
-            <p className="status-pill">{statusText}</p>
-            <p className="workspace-metric-chip">{statusMetricText}</p>
+        </div>
+
+        <div className="workspace-current-card">
+          <div className="workspace-current-copy stack-xs">
+            <p className="workspace-current-label">현재 작업</p>
+            <p className="workspace-current-name">{project?.title ?? "새 작업"}</p>
+            <p className="workspace-current-source" title={workspaceDescription}>
+              {workspaceDescription}
+            </p>
           </div>
+          <p className="workspace-current-summary">{currentProjectSummary}</p>
         </div>
 
         <div className="workspace-tab-shell">
           <div className="workspace-tab-strip" role="tablist" aria-label="작업 화면 탭">
-            <button
-              className={workspaceMode === "library" ? "workspace-tab is-active" : "workspace-tab"}
-              type="button"
-              role="tab"
-              id="workspace-tab-library"
-              aria-selected={workspaceMode === "library"}
-              aria-controls="workspace-panel-library"
-              onClick={() => setWorkspaceMode("library")}
-            >
-              <span className="button-with-icon">
-                <FolderOpen className="button-icon" aria-hidden="true" />
-                <span className="button-label">저장된 작업</span>
-              </span>
-            </button>
-            <button
-              className={workspaceMode === "convert" ? "workspace-tab is-active" : "workspace-tab"}
-              type="button"
-              role="tab"
-              id="workspace-tab-convert"
-              aria-selected={workspaceMode === "convert"}
-              aria-controls="workspace-panel-convert"
-              onClick={() => setWorkspaceMode("convert")}
-            >
-              <span className="button-with-icon">
-                <Film className="button-icon" aria-hidden="true" />
-                <span className="button-label">유튜브 변환</span>
-              </span>
-            </button>
-            <button
-              className={workspaceMode === "edit" ? "workspace-tab is-active" : "workspace-tab"}
-              type="button"
-              role="tab"
-              id="workspace-tab-edit"
-              aria-selected={workspaceMode === "edit"}
-              aria-controls="workspace-panel-edit"
-              disabled={!project?.assembledScore}
-              onClick={() => setWorkspaceMode("edit")}
-            >
-              <span className="button-with-icon">
-                <Pencil className="button-icon" aria-hidden="true" />
-                <span className="button-label">악보 수정</span>
-              </span>
-            </button>
+            {workspaceTabs.map((tab) => {
+              const Icon = tab.icon;
+
+              return (
+                <button
+                  key={tab.id}
+                  className={workspaceMode === tab.id ? "workspace-tab is-active" : "workspace-tab"}
+                  type="button"
+                  role="tab"
+                  id={`workspace-tab-${tab.id}`}
+                  aria-selected={workspaceMode === tab.id}
+                  aria-controls={`workspace-panel-${tab.id}`}
+                  disabled={tab.disabled}
+                  onClick={() => setWorkspaceMode(tab.id)}
+                >
+                  <span className="workspace-tab-head">
+                    <span className="button-with-icon">
+                      <Icon className="button-icon" aria-hidden="true" />
+                      <span className="button-label">{tab.label}</span>
+                    </span>
+                  </span>
+                  <span className="workspace-tab-caption">{tab.caption}</span>
+                </button>
+              );
+            })}
           </div>
         </div>
       </section>
@@ -414,6 +499,7 @@ export function TabWorkbench() {
                 const isLoadingProject = loadingProjectId === savedProject.id;
                 const isEditingTitle = editingProjectId === savedProject.id;
                 const isSavingTitle = savingProjectTitleId === savedProject.id;
+                const isDeletingProject = deletingProjectId === savedProject.id;
 
                 return (
                   <article
@@ -473,25 +559,39 @@ export function TabWorkbench() {
 
                     {!isEditingTitle ? (
                       <div className="saved-project-actions">
-                        <button
-                          className="ghost-button"
-                          type="button"
-                          onClick={() => openRenameEditor(savedProject)}
-                        >
-                          <span className="button-with-icon">
+                        <div className="saved-project-secondary-actions">
+                          <button
+                            className="ghost-button icon-button"
+                            type="button"
+                            onClick={() => openRenameEditor(savedProject)}
+                            disabled={isLoadingProject || isDeletingProject}
+                            title="작업 이름 수정"
+                            aria-label="작업 이름 수정"
+                          >
                             <Pencil className="button-icon" aria-hidden="true" />
-                            <span className="button-label">이름 수정</span>
-                          </span>
-                        </button>
+                          </button>
+                          <button
+                            className="ghost-button icon-button"
+                            type="button"
+                            onClick={() => void deleteProject(savedProject.id)}
+                            disabled={isLoadingProject || isDeletingProject}
+                            title="저장된 작업 삭제"
+                            aria-label="저장된 작업 삭제"
+                          >
+                            <Trash2 className="button-icon" aria-hidden="true" />
+                          </button>
+                        </div>
                         <button
                           className="primary-button"
                           type="button"
                           onClick={() => void loadProjectById(savedProject.id)}
-                          disabled={isLoadingProject}
+                          disabled={isLoadingProject || isDeletingProject}
                         >
                           <span className="button-with-icon">
                             <FolderOpen className="button-icon" aria-hidden="true" />
-                            <span className="button-label">{isLoadingProject ? "불러오는 중" : "불러오기"}</span>
+                            <span className="button-label">
+                              {isDeletingProject ? "삭제 중" : isLoadingProject ? "불러오는 중" : "불러오기"}
+                            </span>
                           </span>
                         </button>
                       </div>

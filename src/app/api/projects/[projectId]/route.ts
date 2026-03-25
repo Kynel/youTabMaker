@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { applyRuntimeToProject } from "@/lib/project";
 import { inspectRuntime } from "@/lib/runtime";
-import { loadDraftProject, updateDraftProject } from "@/lib/storage";
+import { deleteDraftProject, loadDraftProject, updateDraftProject } from "@/lib/storage";
 
 export const dynamic = "force-dynamic";
 
@@ -44,6 +44,21 @@ export async function PATCH(
     }));
     const hydratedProject = applyRuntimeToProject(updatedProject, inspectRuntime());
     return NextResponse.json({ project: hydratedProject });
+  } catch {
+    return NextResponse.json({ error: "작업을 찾지 못했습니다." }, { status: 404 });
+  }
+}
+
+export async function DELETE(
+  _request: Request,
+  context: { params: Promise<{ projectId: string }> }
+) {
+  const { projectId } = await context.params;
+
+  try {
+    await loadDraftProject(projectId);
+    await deleteDraftProject(projectId);
+    return NextResponse.json({ ok: true });
   } catch {
     return NextResponse.json({ error: "작업을 찾지 못했습니다." }, { status: 404 });
   }

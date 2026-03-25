@@ -1,6 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent
+} from "react";
 import {
   BookOpen,
   ChevronLeft,
@@ -172,6 +178,150 @@ function formatViewerScrollSpeed(speed: number) {
   return `${Math.round(speed)} px/s`;
 }
 
+function normalizeSliderValue(value: number, minimum: number, maximum: number, step: number) {
+  const clampedValue = clampNumber(value, minimum, maximum);
+  const normalizedStep = Math.max(1, step);
+  const steppedValue =
+    Math.round((clampedValue - minimum) / normalizedStep) * normalizedStep + minimum;
+
+  return clampNumber(steppedValue, minimum, maximum);
+}
+
+interface ViewerSpeedSliderProps {
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  onChange: (value: number) => void;
+  ariaLabel: string;
+  variant?: "default" | "compact";
+}
+
+function ViewerSpeedSlider({
+  value,
+  min,
+  max,
+  step,
+  onChange,
+  ariaLabel,
+  variant = "default"
+}: ViewerSpeedSliderProps) {
+  const sliderRef = useRef<HTMLDivElement | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const range = Math.max(1, max - min);
+  const percentage = ((value - min) / range) * 100;
+
+  function updateValueFromClientX(clientX: number) {
+    const sliderElement = sliderRef.current;
+
+    if (!sliderElement) {
+      return;
+    }
+
+    const bounds = sliderElement.getBoundingClientRect();
+    const relativeRatio = clampNumber((clientX - bounds.left) / Math.max(1, bounds.width), 0, 1);
+    const nextValue = normalizeSliderValue(min + range * relativeRatio, min, max, step);
+
+    onChange(nextValue);
+  }
+
+  function handlePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setIsDragging(true);
+    updateValueFromClientX(event.clientX);
+  }
+
+  function handlePointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!isDragging) {
+      return;
+    }
+
+    updateValueFromClientX(event.clientX);
+  }
+
+  function handlePointerUp(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!isDragging) {
+      return;
+    }
+
+    updateValueFromClientX(event.clientX);
+    setIsDragging(false);
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }
+
+  function handlePointerCancel(event: ReactPointerEvent<HTMLDivElement>) {
+    setIsDragging(false);
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }
+
+  function handleKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
+      event.preventDefault();
+      onChange(normalizeSliderValue(value - step, min, max, step));
+      return;
+    }
+
+    if (event.key === "ArrowRight" || event.key === "ArrowUp") {
+      event.preventDefault();
+      onChange(normalizeSliderValue(value + step, min, max, step));
+      return;
+    }
+
+    if (event.key === "Home") {
+      event.preventDefault();
+      onChange(min);
+      return;
+    }
+
+    if (event.key === "End") {
+      event.preventDefault();
+      onChange(max);
+    }
+  }
+
+  return (
+    <div
+      className={
+        isDragging
+          ? variant === "compact"
+            ? "viewer-custom-slider is-dragging is-compact"
+            : "viewer-custom-slider is-dragging"
+          : variant === "compact"
+            ? "viewer-custom-slider is-compact"
+            : "viewer-custom-slider"
+      }
+    >
+      <div
+        ref={sliderRef}
+        className="viewer-custom-slider-track"
+        role="slider"
+        tabIndex={0}
+        aria-label={ariaLabel}
+        aria-valuemin={min}
+        aria-valuemax={max}
+        aria-valuenow={value}
+        aria-valuetext={formatViewerScrollSpeed(value)}
+        onKeyDown={handleKeyDown}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerCancel}
+      >
+        <div className="viewer-custom-slider-rail" />
+        <div className="viewer-custom-slider-fill" style={{ width: `${percentage}%` }} />
+        <div className="viewer-custom-slider-thumb" style={{ left: `${percentage}%` }} />
+      </div>
+    </div>
+  );
+}
+
 function buildGapKey(previousCropIndex: number | null, nextCropIndex: number | null) {
   return `${previousCropIndex ?? "start"}:${nextCropIndex ?? "end"}`;
 }
@@ -311,6 +461,12 @@ export function FrameSelectionLab({
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewerBodyRef = useRef<HTMLDivElement | null>(null);
   const viewerAutoScrollPositionRef = useRef(0);
+  const viewerTapGestureRef = useRef<{ pointerId: number | null; startX: number; startY: number; moved: boolean }>({
+    pointerId: null,
+    startX: 0,
+    startY: 0,
+    moved: false
+  });
   const roiSelectionSyncKeyRef = useRef<string | null>(null);
   const [imageElement, setImageElement] = useState<HTMLImageElement | null>(null);
   const [selection, setSelection] = useState<RawSelection | null>(null);
@@ -1402,6 +1558,68 @@ export function FrameSelectionLab({
     );
   }
 
+  function handleViewerBodyPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!isViewerToolbarHidden || viewerMode !== "scroll") {
+      return;
+    }
+
+    viewerTapGestureRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      moved: false
+    };
+  }
+
+  function handleViewerBodyPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!isViewerToolbarHidden || viewerMode !== "scroll") {
+      return;
+    }
+
+    if (viewerTapGestureRef.current.pointerId !== event.pointerId) {
+      return;
+    }
+
+    if (
+      Math.abs(event.clientX - viewerTapGestureRef.current.startX) > 8 ||
+      Math.abs(event.clientY - viewerTapGestureRef.current.startY) > 8
+    ) {
+      viewerTapGestureRef.current.moved = true;
+    }
+  }
+
+  function handleViewerBodyPointerUp(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!isViewerToolbarHidden || viewerMode !== "scroll") {
+      return;
+    }
+
+    if (viewerTapGestureRef.current.pointerId !== event.pointerId) {
+      return;
+    }
+
+    const shouldToggleAutoScroll = !viewerTapGestureRef.current.moved;
+
+    viewerTapGestureRef.current = {
+      pointerId: null,
+      startX: 0,
+      startY: 0,
+      moved: false
+    };
+
+    if (shouldToggleAutoScroll) {
+      setViewerAutoScrollEnabled((currentValue) => !currentValue);
+    }
+  }
+
+  function handleViewerBodyPointerCancel() {
+    viewerTapGestureRef.current = {
+      pointerId: null,
+      startX: 0,
+      startY: 0,
+      moved: false
+    };
+  }
+
   function goToPreviousViewerPages() {
     setViewerPageStartIndex((currentPageStartIndex) =>
       Math.max(0, currentPageStartIndex - viewerPageSpread)
@@ -1736,12 +1954,17 @@ export function FrameSelectionLab({
         </>
       ) : (
         <>
-          <div className="workspace-subheader">
-            <div className="workspace-subheader-main">
+          <div className="workspace-subheader editor-subheader">
+            <div className="workspace-subheader-main editor-subheader-main stack-xs">
+              <p className="editor-kicker">Score Editor</p>
               <h2 className="section-title">악보 수정</h2>
+              <p className="muted editor-subheader-copy">전체 악보를 보면서 조각 추가, 삭제, 출력 설정을 정리합니다.</p>
             </div>
-            <div className="workspace-subheader-meta">
-              <p className="section-summary-chip">{summaryText}</p>
+            <div className="workspace-subheader-meta editor-subheader-meta">
+              <div className="section-summary-chip editor-summary-chip">
+                <span className="editor-summary-label">요약</span>
+                <span className="editor-summary-value">{summaryText}</span>
+              </div>
               <button className="ghost-button" type="button" onClick={() => onRequestWorkspaceMode("convert")}>
                 <span className="button-with-icon">
                   <Film className="button-icon" aria-hidden="true" />
@@ -1752,67 +1975,84 @@ export function FrameSelectionLab({
           </div>
 
           {project.assembledScore && assembledScoreUrl ? (
-            <div className="section-block stack-xs">
-              <div className="row-between">
-                <div className="stack-xs">
-                  <p className="section-label">전체 Tab</p>
-                  <p className="muted">
-                    {project.assembledScore.sourceFrameCount}
-                    {" -> "}
-                    {project.assembledScore.stitchedFrameCount}
-                    {manualInsertedCount > 0 ? ` / 수동 추가 ${manualInsertedCount}` : ""}
-                  </p>
+            <div className="section-block editor-panel-shell stack-sm">
+              <div className="editor-panel-header">
+                <div className="editor-panel-title">
+                  <div className="editor-panel-icon">
+                    <BookOpen className="button-icon" aria-hidden="true" />
+                  </div>
+                  <div className="stack-xs">
+                    <p className="section-label">전체 Tab</p>
+                    <p className="editor-panel-meta">
+                      {project.assembledScore.sourceFrameCount}
+                      {" -> "}
+                      {project.assembledScore.stitchedFrameCount}
+                      {manualInsertedCount > 0 ? ` / 수동 추가 ${manualInsertedCount}` : ""}
+                    </p>
+                  </div>
                 </div>
+
                 <div className="editor-toolbar">
-                  <div className="toggle-group" role="group" aria-label="Score background">
-                    <button
-                      className={previewBackground === "dark" ? "toggle-button is-active" : "toggle-button"}
-                      type="button"
-                      onClick={() => setPreviewBackground("dark")}
-                    >
-                      검정 배경
-                    </button>
-                    <button
-                      className={previewBackground === "light" ? "toggle-button is-active" : "toggle-button"}
-                      type="button"
-                      onClick={() => setPreviewBackground("light")}
-                    >
-                      흰 배경
-                    </button>
+                  <div className="editor-toolbar-section">
+                    <p className="editor-toolbar-label">보기 배경</p>
+                    <div className="toggle-group" role="group" aria-label="Score background">
+                      <button
+                        className={previewBackground === "dark" ? "toggle-button is-active" : "toggle-button"}
+                        type="button"
+                        onClick={() => setPreviewBackground("dark")}
+                      >
+                        검정 배경
+                      </button>
+                      <button
+                        className={previewBackground === "light" ? "toggle-button is-active" : "toggle-button"}
+                        type="button"
+                        onClick={() => setPreviewBackground("light")}
+                      >
+                        흰 배경
+                      </button>
+                    </div>
                   </div>
-                  <div className="toggle-group" role="group" aria-label="Final tab color mode">
-                    <button
-                      className={scoreColorMode === "original" ? "toggle-button is-active" : "toggle-button"}
-                      type="button"
-                      onClick={() => setScoreColorMode("original")}
-                    >
-                      원본
-                    </button>
-                    <button
-                      className={scoreColorMode === "inverted" ? "toggle-button is-active" : "toggle-button"}
-                      type="button"
-                      onClick={() => setScoreColorMode("inverted")}
-                    >
-                      반전
-                    </button>
+                  <div className="editor-toolbar-section">
+                    <p className="editor-toolbar-label">표시 방식</p>
+                    <div className="toggle-group" role="group" aria-label="Final tab color mode">
+                      <button
+                        className={scoreColorMode === "original" ? "toggle-button is-active" : "toggle-button"}
+                        type="button"
+                        onClick={() => setScoreColorMode("original")}
+                      >
+                        원본
+                      </button>
+                      <button
+                        className={scoreColorMode === "inverted" ? "toggle-button is-active" : "toggle-button"}
+                        type="button"
+                        onClick={() => setScoreColorMode("inverted")}
+                      >
+                        반전
+                      </button>
+                    </div>
                   </div>
-                  <button className="ghost-button" type="button" onClick={() => setIsScoreViewerOpen(true)}>
-                    <span className="button-with-icon">
-                      <Expand className="button-icon" aria-hidden="true" />
-                      <span className="button-label">크게 보기</span>
-                    </span>
-                  </button>
-                  <button
-                    className="primary-button"
-                    type="button"
-                    onClick={() => void downloadScoreImage()}
-                    disabled={isDownloadingScore || isExportLocked}
-                  >
-                    <span className="button-with-icon">
-                      <Download className="button-icon" aria-hidden="true" />
-                      <span className="button-label">{isDownloadingScore ? "PNG 생성 중" : "PNG"}</span>
-                    </span>
-                  </button>
+                  <div className="editor-toolbar-section is-actions">
+                    <p className="editor-toolbar-label">출력</p>
+                    <div className="editor-toolbar-actions">
+                      <button className="ghost-button" type="button" onClick={() => setIsScoreViewerOpen(true)}>
+                        <span className="button-with-icon">
+                          <Expand className="button-icon" aria-hidden="true" />
+                          <span className="button-label">크게 보기</span>
+                        </span>
+                      </button>
+                      <button
+                        className="primary-button"
+                        type="button"
+                        onClick={() => void downloadScoreImage()}
+                        disabled={isDownloadingScore || isExportLocked}
+                      >
+                        <span className="button-with-icon">
+                          <Download className="button-icon" aria-hidden="true" />
+                          <span className="button-label">{isDownloadingScore ? "PNG 생성 중" : "PNG"}</span>
+                        </span>
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -1900,35 +2140,128 @@ export function FrameSelectionLab({
         >
           <div className="viewer-panel" onClick={(event) => event.stopPropagation()}>
             {isViewerToolbarHidden ? (
-              <div className="viewer-floating-actions">
-                <button
-                  className="ghost-button icon-button"
-                  type="button"
-                  onClick={() => setIsViewerToolbarHidden(false)}
-                  aria-label="설정 보기"
-                  title="설정 보기"
-                >
-                  <Eye className="button-icon" aria-hidden="true" />
-                </button>
-                <button
-                  className="ghost-button icon-button"
-                  type="button"
-                  onClick={() => setIsScoreViewerOpen(false)}
-                  aria-label="닫기"
-                  title="닫기"
-                >
-                  <X className="button-icon" aria-hidden="true" />
-                </button>
-              </div>
+              <>
+                <div className="viewer-floating-actions">
+                  <button
+                    className="ghost-button icon-button"
+                    type="button"
+                    onClick={() => setIsViewerToolbarHidden(false)}
+                    aria-label="설정 보기"
+                    title="설정 보기"
+                  >
+                    <Eye className="button-icon" aria-hidden="true" />
+                  </button>
+                  <button
+                    className="ghost-button icon-button"
+                    type="button"
+                    onClick={() => setIsScoreViewerOpen(false)}
+                    aria-label="닫기"
+                    title="닫기"
+                  >
+                    <X className="button-icon" aria-hidden="true" />
+                  </button>
+                </div>
+
+                {viewerMode === "scroll" ? (
+                  <div className="viewer-floating-scroll-controls">
+                    <button
+                      className={viewerAutoScrollEnabled ? "primary-button viewer-gesture-toggle" : "ghost-button viewer-gesture-toggle"}
+                      type="button"
+                      onClick={() => setViewerAutoScrollEnabled((currentValue) => !currentValue)}
+                    >
+                      <span className="viewer-gesture-label">
+                        화면 탭
+                        {" · "}
+                        {viewerAutoScrollEnabled ? "정지" : "시작"}
+                      </span>
+                      <span className="viewer-gesture-value">{formatViewerScrollSpeed(viewerAutoScrollSpeed)}</span>
+                    </button>
+                    <div className="viewer-floating-speed">
+                      <ViewerSpeedSlider
+                        ariaLabel="자동 스크롤 속도"
+                        value={viewerAutoScrollSpeed}
+                        min={VIEWER_AUTO_SCROLL_MIN}
+                        max={VIEWER_AUTO_SCROLL_MAX}
+                        step={VIEWER_AUTO_SCROLL_STEP}
+                        onChange={setViewerAutoScrollSpeed}
+                        variant="compact"
+                      />
+                    </div>
+                    <div className="viewer-floating-zoom">
+                      <button
+                        className="ghost-button icon-button"
+                        type="button"
+                        onClick={() => adjustViewerScrollZoom(-VIEWER_SCROLL_ZOOM_STEP)}
+                        disabled={viewerScrollZoomPercent <= VIEWER_SCROLL_ZOOM_MIN}
+                        aria-label="화면 축소"
+                        title="화면 축소"
+                      >
+                        <Minus className="button-icon" aria-hidden="true" />
+                      </button>
+                      <span className="viewer-floating-zoom-value">{viewerScrollZoomPercent}%</span>
+                      <button
+                        className="ghost-button icon-button"
+                        type="button"
+                        onClick={() => adjustViewerScrollZoom(VIEWER_SCROLL_ZOOM_STEP)}
+                        disabled={viewerScrollZoomPercent >= VIEWER_SCROLL_ZOOM_MAX}
+                        aria-label="화면 확대"
+                        title="화면 확대"
+                      >
+                        <Plus className="button-icon" aria-hidden="true" />
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+              </>
             ) : (
               <div className="viewer-toolbar">
-                <div className="viewer-toolbar-strip">
+                <div className="viewer-toolbar-top">
                   <div className="viewer-toolbar-brand">
-                    <p className="section-label">Fullscreen Tab</p>
-                    <p className="viewer-toolbar-status">{viewerStatusLabel}</p>
+                    <div className="viewer-toolbar-copy stack-xs">
+                      <p className="viewer-toolbar-kicker">Score Viewer</p>
+                      <div className="viewer-toolbar-title-line">
+                        <p className="section-label">Fullscreen Tab</p>
+                        <p className="viewer-toolbar-status">{viewerStatusLabel}</p>
+                      </div>
+                    </div>
                   </div>
-                  <div className="viewer-toolbar-inline-group" role="group" aria-label="Viewer mode">
-                    <span className="viewer-inline-label">보기</span>
+
+                  <div className="viewer-toolbar-actions">
+                    <button
+                      className="ghost-button icon-button"
+                      type="button"
+                      onClick={() => setIsViewerToolbarHidden(true)}
+                      aria-label="설정 숨기기"
+                      title="설정 숨기기"
+                    >
+                      <EyeOff className="button-icon" aria-hidden="true" />
+                    </button>
+                    <button
+                      className="primary-button"
+                      type="button"
+                      onClick={() => void downloadScoreImage()}
+                      disabled={isDownloadingScore || isExportLocked}
+                    >
+                      <span className="button-with-icon">
+                        <Download className="button-icon" aria-hidden="true" />
+                        <span className="button-label">{isDownloadingScore ? "PNG 생성 중" : "PNG"}</span>
+                      </span>
+                    </button>
+                    <button
+                      className="ghost-button icon-button"
+                      type="button"
+                      onClick={() => setIsScoreViewerOpen(false)}
+                      aria-label="닫기"
+                      title="닫기"
+                    >
+                      <X className="button-icon" aria-hidden="true" />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="viewer-toolbar-strip">
+                  <div className="viewer-toolbar-inline-group is-mode" role="group" aria-label="Viewer mode">
+                    <span className="viewer-inline-label">보기 방식</span>
                     <div className="toggle-group">
                       <button
                         className={viewerMode === "scroll" ? "toggle-button is-active" : "toggle-button"}
@@ -1955,7 +2288,7 @@ export function FrameSelectionLab({
 
                   {viewerMode === "scroll" ? (
                     <>
-                      <div className="viewer-toolbar-inline-group">
+                      <div className="viewer-toolbar-inline-group is-zoom">
                         <span className="viewer-inline-label">확대</span>
                         <button
                           className="ghost-button icon-button"
@@ -1979,40 +2312,44 @@ export function FrameSelectionLab({
                           <Plus className="button-icon" aria-hidden="true" />
                         </button>
                       </div>
-                      <div className="viewer-toolbar-inline-group is-grow">
-                        <button
-                          className={viewerAutoScrollEnabled ? "primary-button" : "ghost-button"}
-                          type="button"
-                          onClick={() => setViewerAutoScrollEnabled((currentValue) => !currentValue)}
-                        >
-                          <span className="button-with-icon">
-                            {viewerAutoScrollEnabled ? (
-                              <Pause className="button-icon" aria-hidden="true" />
-                            ) : (
-                              <Play className="button-icon" aria-hidden="true" />
-                            )}
-                            <span className="button-label">{viewerAutoScrollEnabled ? "정지" : "시작"}</span>
-                          </span>
-                        </button>
-                        <label className="viewer-slider-wrap is-inline">
-                          <span className="viewer-inline-label">속도</span>
-                          <input
-                            className="viewer-speed-slider"
-                            type="range"
-                            min={VIEWER_AUTO_SCROLL_MIN}
-                            max={VIEWER_AUTO_SCROLL_MAX}
-                            step={VIEWER_AUTO_SCROLL_STEP}
-                            value={viewerAutoScrollSpeed}
-                            onChange={(event) => setViewerAutoScrollSpeed(Number(event.currentTarget.value))}
-                          />
-                        </label>
-                        <p className="viewer-control-value">{formatViewerScrollSpeed(viewerAutoScrollSpeed)}</p>
+                      <div className="viewer-toolbar-inline-group is-grow is-playback">
+                        <div className="viewer-inline-stack">
+                          <span className="viewer-inline-label">자동 스크롤</span>
+                          <button
+                            className={viewerAutoScrollEnabled ? "primary-button" : "ghost-button"}
+                            type="button"
+                            onClick={() => setViewerAutoScrollEnabled((currentValue) => !currentValue)}
+                          >
+                            <span className="button-with-icon">
+                              {viewerAutoScrollEnabled ? (
+                                <Pause className="button-icon" aria-hidden="true" />
+                              ) : (
+                                <Play className="button-icon" aria-hidden="true" />
+                              )}
+                              <span className="button-label">{viewerAutoScrollEnabled ? "정지" : "시작"}</span>
+                            </span>
+                          </button>
+                        </div>
+                        <div className="viewer-speed-block">
+                          <label className="viewer-slider-wrap is-inline">
+                            <span className="viewer-inline-label">속도</span>
+                            <ViewerSpeedSlider
+                              ariaLabel="자동 스크롤 속도"
+                              value={viewerAutoScrollSpeed}
+                              min={VIEWER_AUTO_SCROLL_MIN}
+                              max={VIEWER_AUTO_SCROLL_MAX}
+                              step={VIEWER_AUTO_SCROLL_STEP}
+                              onChange={setViewerAutoScrollSpeed}
+                            />
+                          </label>
+                          <p className="viewer-control-value">{formatViewerScrollSpeed(viewerAutoScrollSpeed)}</p>
+                        </div>
                       </div>
                     </>
                   ) : (
                     <>
-                      <div className="viewer-toolbar-inline-group" role="group" aria-label="Page spread">
-                        <span className="viewer-inline-label">페이지</span>
+                      <div className="viewer-toolbar-inline-group is-page" role="group" aria-label="Page spread">
+                        <span className="viewer-inline-label">페이지 보기</span>
                         <div className="toggle-group">
                           <button
                             className={viewerPageSpread === 1 ? "toggle-button is-active" : "toggle-button"}
@@ -2037,7 +2374,8 @@ export function FrameSelectionLab({
                           </button>
                         </div>
                       </div>
-                      <div className="viewer-toolbar-inline-group">
+                      <div className="viewer-toolbar-inline-group is-nav">
+                        <span className="viewer-inline-label">페이지 이동</span>
                         <button
                           className="ghost-button icon-button"
                           type="button"
@@ -2063,37 +2401,6 @@ export function FrameSelectionLab({
                     </>
                   )}
                 </div>
-                <div className="viewer-toolbar-actions">
-                  <button
-                    className="ghost-button icon-button"
-                    type="button"
-                    onClick={() => setIsViewerToolbarHidden(true)}
-                    aria-label="설정 숨기기"
-                    title="설정 숨기기"
-                  >
-                    <EyeOff className="button-icon" aria-hidden="true" />
-                  </button>
-                  <button
-                    className="primary-button"
-                    type="button"
-                    onClick={() => void downloadScoreImage()}
-                    disabled={isDownloadingScore || isExportLocked}
-                  >
-                    <span className="button-with-icon">
-                      <Download className="button-icon" aria-hidden="true" />
-                      <span className="button-label">{isDownloadingScore ? "PNG 생성 중" : "PNG"}</span>
-                    </span>
-                  </button>
-                  <button
-                    className="ghost-button icon-button"
-                    type="button"
-                    onClick={() => setIsScoreViewerOpen(false)}
-                    aria-label="닫기"
-                    title="닫기"
-                  >
-                    <X className="button-icon" aria-hidden="true" />
-                  </button>
-                </div>
               </div>
             )}
             <div
@@ -2111,6 +2418,10 @@ export function FrameSelectionLab({
                       ? "viewer-body is-light is-scroll-zoomed"
                       : "viewer-body is-light"
               }
+              onPointerDown={handleViewerBodyPointerDown}
+              onPointerMove={handleViewerBodyPointerMove}
+              onPointerUp={handleViewerBodyPointerUp}
+              onPointerCancel={handleViewerBodyPointerCancel}
             >
               {viewerMode === "scroll" ? (
                 <div

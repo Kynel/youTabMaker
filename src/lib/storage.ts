@@ -127,6 +127,15 @@ export async function updateDraftProject(
   return updatedProject;
 }
 
+export async function deleteDraftProject(projectId: string) {
+  const projectDirectory = getProjectDirectory(projectId);
+
+  await rm(projectDirectory, {
+    recursive: true,
+    force: true
+  });
+}
+
 export async function saveProjectSourceFrame(
   projectId: string,
   file: File,
